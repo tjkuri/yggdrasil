@@ -6,10 +6,10 @@ require('dotenv').config();
 const basketballTotalApi = require('./routes/basketball-totals'); // Assuming your file path
 
 // Set the port number (default: 3000)
-const port = process.env.PORT || 3001;
+const port = process.env.PORT || 3000;
 
 // Mount the router on the desired path (optional, defaults to '/')
-app.use('/basketball', basketballTotalApi);
+app.use('/api', basketballTotalApi);
 
 // Define routes (example route for testing)
 app.get('/', (req, res) => {
