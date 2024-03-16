@@ -1,17 +1,18 @@
 const express = require('express');
+const nbaAPI = require('./routes/nba'); //modules for handling request to /api/nba endpoint
+
+require('dotenv').config(); //allows us to import variables from .env
+
+//create our server app
 const app = express();
-require('dotenv').config();
 
-
-const basketballTotalApi = require('./routes/basketball-totals'); // Assuming your file path
-
-// Set the port number (default: 3000)
-const port = process.env.PORT || 3000;
+// Set the port number (default: 3001)
+const port = process.env.PORT || 3001;
 
 // Mount the router on the desired path (optional, defaults to '/')
-app.use('/api', basketballTotalApi);
+app.use('/api/nba', nbaAPI);
 
-// Define routes (example route for testing)
+// Example Hello World route
 app.get('/', (req, res) => {
   res.send('Hello from the Node.js server!');
 });
