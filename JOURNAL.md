@@ -1,6 +1,9 @@
 # Journal
 Need a file to keep track of why I chose to so certain things.
 
+## 03-17-2024
+Going to try to use balldontlie api when available since its request limits are per minute not per month.
+
 ## 03-16-2024
 I think I may have done more work than needed. I think the odds endpoint does all the things the games endpoint does. So i dont think i need function to fetch from both. Silverlining the games endpoint doesnt count towards your request quota so i havent been eating into it yet.
 
