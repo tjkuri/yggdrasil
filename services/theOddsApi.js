@@ -1,5 +1,6 @@
 const axios = require('axios');
 const utils = require('../utils/utils');
+const fs = require('fs');
 
 require('dotenv').config(); //allows us to import variables from .env
 const oddsApiKey = process.env.ODDS_API_KEY;
