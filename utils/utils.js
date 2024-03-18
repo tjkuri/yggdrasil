@@ -4,7 +4,7 @@ const axios = require('axios');
 const fs = require('fs');
 
 module.exports = {
-    getToday10AMEST, getToday1130PMEST, getYesterdayUTC
+    getToday10AMEST, getToday1130PMEST, getYesterdayEST
 };
 
 /**
@@ -14,6 +14,7 @@ module.exports = {
 function getToday10AMEST() {
     const today = new Date();
     today.setHours(10, 0, 0); // Set the time to 10:00 AM
+    today.setMinutes(today.getMinutes() - today.getTimezoneOffset()); // Adjust for EST
     const utcString = today.toISOString(); // Get the UTC representation of the date
     return utcString.slice(0, 19) + 'Z'
 }
@@ -29,9 +30,11 @@ function getToday1130PMEST() {
     return utcString.slice(0, 19) + 'Z'
 }
 
-function getYesterdayUTC() {
-    const today = new Date();
-    const yesterday = new Date(today.getTime() - (1000 * 60 * 60 * 24));
-    const utcString = yesterday.toISOString(); // Get the UTC representation of the date
-    return utcString.slice(0, 10)
+function getYesterdayEST() {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1); // Set date to yesterday
+    yesterday.setMinutes(yesterday.getMinutes() - yesterday.getTimezoneOffset()); // Adjust for EST
+
+    const isoString = yesterday.toISOString(); 
+    return isoString.slice(0, 10)
 }

@@ -88,11 +88,10 @@ async function getLastThreeGames(teamFullName, teamId) {
             team_ids: [teamId],
             per_page: 100,
             seasons: [2023], // need this here otherwise itll return a bunch of empty pages. looks like inseason tourny is included
-            end_date: utils.getYesterdayUTC(), // games that occurred on or before today
+            end_date: utils.getYesterdayEST(), // games that occurred on or before today
         }
     }
     try {
-        baseUrl = 'https://api.balldontlie.io/v1/games'
         console.log('Getting totals for ' + teamFullName + ' with id: ' + teamId + ' up through ' + requestConfig.params.end_date)
         const response = await axios.get('https://api.balldontlie.io/v1/games', requestConfig);
         const data = response.data.data

@@ -7,20 +7,36 @@ const utils = require('../utils/utils');
 const ballDontLieAPI = require('../services/ballDontLieApi');
 const theOddsApi = require('../services/theOddsApi');
 
-router.get('/testing', async (req, res) => {
+/**
+ * 
+ * @param {*} ballDontLieGame 
+ * @returns {number}
+ */
+async function getMyLine(ballDontLieGame){
     let teamMap = await ballDontLieAPI.getTeamIdMap();
-    let gamesToday = await ballDontLieAPI.fetchNbaTodayGames();
-    // let game = gamesToday[0]
-    // home = game.home_team
-    // away = game.away_team
-    // console.log(teamMap);
-    // home3gram = await getLastThreeGames(home, teamMap[home.split(" ").pop()])
+    let homeTeamName = ballDontLieGame.home_team.full_name
+    let awayTeamName = ballDontLieGame.visitor_team.full_name
 
-    // console.log(gamesToday)
-    // console.log(home3gram);
-    console.log(teamMap)
+    let home3gram = await ballDontLieAPI.getLastThreeGames(homeTeamName, teamMap[homeTeamName.split(" ").pop()])
+    let away3gram = await ballDontLieAPI.getLastThreeGames(awayTeamName, teamMap[awayTeamName.split(" ").pop()])
+    
+    const game_total = (game) => game.home_team_score + game.visitor_team_score;
+    
+    totalA = home3gram.map(game_total).reduce((partialSum, a) => partialSum + a, 0);
+    totalB = away3gram.map(game_total).reduce((partialSum, a) => partialSum + a, 0);
+  
+    return (totalA + totalB) / 6
+}
+
+router.get('/testing', async (req, res) => {
+    let gamesToday = await ballDontLieAPI.fetchNbaTodayGames();
+
+    for (let game of gamesToday) {
+        const myLine = await getMyLine(game)
+        game['myLine'] = myLine
+    }
     console.log(gamesToday)
-    res.json({});
+    res.json(gamesToday);
 });  
 
 
@@ -42,10 +58,6 @@ router.get('/totals', async (req, res) => {
 
     // console.log(gamesWithLines);
     res.json(gamesWithLines);
-
-
-    // TODO:
-    // 3. For each game calculate my line
 });
 
 // Export the router to be used in your main server file
