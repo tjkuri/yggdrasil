@@ -8,15 +8,16 @@ const ballDontLieAPI = require('../services/ballDontLieApi');
 const theOddsApi = require('../services/theOddsApi');
 
 /**
- * 
- * @param {*} ballDontLieGame 
- * @returns {number}
+ * Given a BallDontLieAPI JSON representaiton of an NBA game, determine what my line for the total score is
+ * @param {json} ballDontLieGame - BallDontLieAPI JSON representaiton of an NBA game
+ * @returns {number} My line
  */
 async function getMyLine(ballDontLieGame){
     let teamMap = await ballDontLieAPI.getTeamIdMap();
     let homeTeamName = ballDontLieGame.home_team.full_name
     let awayTeamName = ballDontLieGame.visitor_team.full_name
 
+    // Fetch the last 3 non OT games that each team played in
     let home3gram = await ballDontLieAPI.getLastThreeGames(homeTeamName, teamMap[homeTeamName.split(" ").pop()])
     let away3gram = await ballDontLieAPI.getLastThreeGames(awayTeamName, teamMap[awayTeamName.split(" ").pop()])
     
@@ -24,40 +25,73 @@ async function getMyLine(ballDontLieGame){
     
     totalA = home3gram.map(game_total).reduce((partialSum, a) => partialSum + a, 0);
     totalB = away3gram.map(game_total).reduce((partialSum, a) => partialSum + a, 0);
-  
+    
+    // Return the average of the last three games of each team
     return (totalA + totalB) / 6
 }
 
-router.get('/testing', async (req, res) => {
+/**
+ * Fetch  JSON representaiton of an NBA games played today with my line inlcuded as a field
+ * @returns NBA game jsons with my line
+ */
+async function getTodayMyLines(){
     let gamesToday = await ballDontLieAPI.fetchNbaTodayGames();
 
     for (let game of gamesToday) {
         const myLine = await getMyLine(game)
         game['myLine'] = myLine
     }
-    console.log(gamesToday)
-    res.json(gamesToday);
+    // console.log(gamesToday)
+    return gamesToday
+}
+
+/**
+ * TODO
+ * @param {*} oddsApiGames 
+ * @param {*} homeTeam 
+ * @returns 
+ */
+function findOddsApiGameByHomeTeam(oddsApiGames, homeTeam) {
+    for (const game of oddsApiGames) {
+      if (game.home_team.split(" ").pop() === homeTeam.split(" ").pop()) {
+        return game;
+      }
+    }
+    return false;
+  }
+
+// misc. endpoint used for testing and dev
+router.get('/testing', async (req, res) => {
+    let foo = await getTodayMyLines();
+    res.json(foo);
 });  
 
 
 // Handle GET requests for endpoint `/api/nba/totals`
-// Return my line for all games today and whether to take O/U for the lines set by sportsbooks of note.
+// Return Every NBA game for today with my line and the sportsbook lines
 router.get('/totals', async (req, res) => {
     const reCache = false;
     const cacheFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-total-odds.json' // get the date for today to use as out filename
-    var gamesWithLines;
+    var gamesVegasLines;
 
     if (fs.existsSync(cacheFilePath) && !reCache) {
         console.log('Using cached data from file');
         const cachedOdds = await fs.promises.readFile(cacheFilePath);
-        gamesWithLines = JSON.parse(cachedOdds);
+        gamesVegasLines = JSON.parse(cachedOdds);
     }
     else{
-        gamesWithLines = await theOddsApi.fetchNbaTodayLines(cacheFilePath);
+        gamesVegasLines = await theOddsApi.fetchNbaTodayLines(cacheFilePath);
     }
 
-    // console.log(gamesWithLines);
-    res.json(gamesWithLines);
+    let gamesMyLines = await getTodayMyLines();
+
+    for (let game of gamesMyLines) {
+        matchingGame = findOddsApiGameByHomeTeam(gamesVegasLines, game.home_team.full_name)
+        game['bookmakers'] = matchingGame.bookmakers
+    } 
+
+    console.log(gamesMyLines)
+    res.json(gamesMyLines);
 });
 
 // Export the router to be used in your main server file
