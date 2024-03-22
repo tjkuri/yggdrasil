@@ -9,6 +9,16 @@ const app = express();
 // Set the port number (default: 3001)
 const port = process.env.PORT || 3001;
 
+app.use(function (req, res, next) {
+  res.header('Access-Control-Allow-Origin', "http://localhost:3000"); //TODO: change this is if we deploy
+  res.header('Access-Control-Allow-Headers',
+      'Content-Type, X-Requested-With, Origin');
+  res.header('Access-Control-Allow-Methods',
+      'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header("Access-Control-Allow-Credentials", "true");
+  next();
+});
+
 // Mount the router on the desired path (optional, defaults to '/')
 app.use('/api/nba', nbaAPI);
 
