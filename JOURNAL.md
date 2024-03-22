@@ -1,10 +1,13 @@
 # Journal
 Need a file to keep track of why I chose to so certain things.
 
+## 03-21-2024
+Going to add some functions to save and retrive from cache. The obvious solution is to add some databases solution but for now since im trying to go fast .json files will do. (maybe next time Ill start at the beginning of the sports season so Im not racing with the end of season)
+
 ## 03-17-2024
 Going to try to use balldontlie api when available since its request limits are per minute not per month.
 ### Potential TODO's
-- async/await works fine for now, but when getting 'myLine' for all the games in a game slows down because all the calls are sequential. In the future if this becomes an issue we should look at places where there are a lot of consecutive calls and swap it out for get/then + whatever other changes might ensue.
+- async/await works fine for now, but when getting 'myLine' for all the games in a game slows down because all the calls are sequential. In the future if this becomes an issue we should look at places where there are a lot of consecutive calls and swap it out for get/then/Promises architecture + whatever other changes might ensue.
 
 ## 03-16-2024
 I think I may have done more work than needed. I think the odds endpoint does all the things the games endpoint does. So i dont think i need function to fetch from both. Silverlining the games endpoint doesnt count towards your request quota so i havent been eating into it yet.

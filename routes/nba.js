@@ -46,7 +46,7 @@ async function getTodayMyLines(){
 }
 
 /**
- * TODO
+ * Given a home team, return the OddsAPI game from the list of games that matches, false if non is present.
  * @param {*} oddsApiGames 
  * @param {*} homeTeam 
  * @returns 
@@ -60,6 +60,19 @@ function findOddsApiGameByHomeTeam(oddsApiGames, homeTeam) {
     return false;
   }
 
+async function addToCache(data, file_name){
+    await fs.promises.writeFile(file_name, JSON.stringify(data), 'utf-8');
+}
+
+async function retrieveFromCache(file_path){
+    if (fs.existsSync(file_path)) {
+        console.log('Using cached data from file');
+        const cachedData = await fs.promises.readFile(file_path);
+        return JSON.parse(cachedData);
+    }
+    return false;
+}
+
 // misc. endpoint used for testing and dev
 router.get('/testing', async (req, res) => {
     let foo = await getTodayMyLines();
@@ -71,19 +84,27 @@ router.get('/testing', async (req, res) => {
 // Return Every NBA game for today with my line and the sportsbook lines
 router.get('/totals', async (req, res) => {
     const reCache = false;
-    const cacheFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-total-odds.json' // get the date for today to use as out filename
-    var gamesVegasLines;
+    const oddsFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-total-odds.json' // get the date for today to use as out filename
+    var gamesVegasLines = await retrieveFromCache(oddsFilePath)
 
-    if (fs.existsSync(cacheFilePath) && !reCache) {
-        console.log('Using cached data from file');
-        const cachedOdds = await fs.promises.readFile(cacheFilePath);
-        gamesVegasLines = JSON.parse(cachedOdds);
+    if (gamesVegasLines && !reCache) {
+        console.log('Using cached data from:' + oddsFilePath);
     }
     else{
-        gamesVegasLines = await theOddsApi.fetchNbaTodayLines(cacheFilePath);
+        gamesVegasLines = await theOddsApi.fetchNbaTodayLines();
+        addToCache(gamesVegasLines, oddsFilePath)
     }
 
-    let gamesMyLines = await getTodayMyLines();
+
+    const myLineFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-my-lines.json' // get the date for today to use as out filename
+    let gamesMyLines = await retrieveFromCache(myLineFilePath);
+    if (gamesMyLines && !reCache) {
+        console.log('Using cached data from:' + myLineFilePath);
+    }
+    else{
+        gamesMyLines = await getTodayMyLines();
+        addToCache(gamesMyLines, myLineFilePath)
+    }
 
     for (let game of gamesMyLines) {
         matchingGame = findOddsApiGameByHomeTeam(gamesVegasLines, game.home_team.full_name)

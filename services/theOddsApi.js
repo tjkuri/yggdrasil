@@ -42,10 +42,9 @@ async function fetchNbaTodayGames() {
 /**
  * Fetch the games and total point lines in the NBA today. NOTE: only returns games where bookmakers
  * still have lines open
- * @param {string} cacheFilePath File path where to cache api response
  * @returns {Array<Dict>} List of jsons each representing an NBA game scheduled for today that had open lines
  */
-async function fetchNbaTodayLines(cacheFilePath) {
+async function fetchNbaTodayLines() {
     var requestConfig = {
         params: {
             apiKey: oddsApiKey,
@@ -61,9 +60,6 @@ async function fetchNbaTodayLines(cacheFilePath) {
         console.log('Fetching NBA Totals odds from odd-api')
         const response = await axios.get('https://api.the-odds-api.com/v4/sports/basketball_nba/odds',requestConfig);
         const data = response.data;
-
-        await fs.promises.writeFile(cacheFilePath, JSON.stringify(data), 'utf-8');
-        console.log('Data fetched and cached to file');
 
         console.log(data)
         console.log(requestConfig.params)
