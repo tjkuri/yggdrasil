@@ -11,7 +11,7 @@ module.exports = {
 
 /**
  * Use Odds-API to fetch a list of NBA games scheduled for today (start time is between 10AM - 1130PM)
- * @returns {Array<Dict>} List of jsons each representing an NBA game scheduled for today
+ * @returns {Array<object>} List of jsons each representing an NBA game scheduled for today
  * @throws {Error} - if the try statement throws an error, it is logged and raised again for callers to handle
  */
 async function fetchNbaTodayGames() {
@@ -42,7 +42,7 @@ async function fetchNbaTodayGames() {
 /**
  * Fetch the games and total point lines in the NBA today. NOTE: only returns games where bookmakers
  * still have lines open
- * @returns {Array<Dict>} List of jsons each representing an NBA game scheduled for today that had open lines
+ * @returns {Array<object>} List of jsons each representing an NBA game scheduled for today that had open lines
  */
 async function fetchNbaTodayLines() {
     var requestConfig = {
