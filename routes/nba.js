@@ -12,7 +12,7 @@ const theOddsApi = require('../services/theOddsApi');
  * @param {object} ballDontLieGame - BallDontLieAPI JSON representaiton of an NBA game
  * @returns {float} - My Line
  */
-async function getMyLine(ballDontLieGame){
+async function getLastSixScores(ballDontLieGame){
     let teamMap = await ballDontLieAPI.getTeamIdMap();
     let homeTeamName = ballDontLieGame.home_team.full_name
     let awayTeamName = ballDontLieGame.visitor_team.full_name
@@ -22,24 +22,23 @@ async function getMyLine(ballDontLieGame){
     let away3gram = await ballDontLieAPI.getLastThreeGames(awayTeamName, teamMap[awayTeamName.split(" ").pop()])
     
     const game_total = (game) => game.home_team_score + game.visitor_team_score;
-    
-    totalA = home3gram.map(game_total).reduce((partialSum, a) => partialSum + a, 0);
-    totalB = away3gram.map(game_total).reduce((partialSum, a) => partialSum + a, 0);
-    
-    // Return the average of the last three games of each team
-    return (totalA + totalB) / 6
+
+    const lastSix = home3gram.concat(away3gram)
+    return lastSix.map(game_total)
 }
 
 /**
  * Fetch  JSON representaiton of an NBA games played today with my line inlcuded as a field
  * @returns {Array<object>} - NBA game jsons with my line
  */
-async function getTodayMyLines(){
+async function getTodaysPlays(){
     let gamesToday = await ballDontLieAPI.fetchNbaTodayGames();
 
     for (let game of gamesToday) {
-        const myLine = await getMyLine(game)
-        game['myLine'] = myLine
+        const lastSixTotals = await getLastSixScores(game)
+        let  myLine = lastSixTotals.reduce((partialSum, a) => partialSum + a, 0) / 6;
+        game['myLine'] = myLine.toFixed(2);
+        game['lastSix'] = lastSixTotals
     }
     return gamesToday
 }
@@ -85,7 +84,7 @@ async function retrieveFromCache(file_path){
 
 // misc. endpoint used for testing and dev
 router.get('/testing', async (req, res) => {
-    let foo = await getTodayMyLines();
+    let foo = await getTodaysPlays();
     res.json(foo);
 });  
 
@@ -114,13 +113,13 @@ router.get('/totals', async (req, res) => {
         console.log('Using cached data from:' + myLineFilePath);
     }
     else{
-        gamesMyLines = await getTodayMyLines();
+        gamesMyLines = await getTodaysPlays();
         addToCache(gamesMyLines, myLineFilePath)
     }
 
     for (let game of gamesMyLines) {
         matchingGame = findOddsApiGameByHomeTeam(gamesVegasLines, game.home_team.full_name)
-        game['bookmakers'] = matchingGame.bookmakers
+        game['bookmakers'] = matchingGame ? matchingGame.bookmakers : false
     } 
 
     console.log(gamesMyLines)
