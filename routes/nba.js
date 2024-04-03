@@ -109,7 +109,7 @@ router.get('/totals', async (req, res) => {
 
     const myLineFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-my-lines.json' // get the date for today to use as out filename
     let gamesMyLines = await retrieveFromCache(myLineFilePath);
-    if (gamesMyLines && !true) {
+    if (gamesMyLines && !reCache) {
         console.log('Using cached data from:' + myLineFilePath);
     }
     else{
@@ -122,12 +122,12 @@ router.get('/totals', async (req, res) => {
         let draftkingsLine = false
         if(matchingGame){
             let draftkingsOdds = matchingGame.bookmakers.filter((book) => book.key === 'draftkings')
-            draftkingsLine = draftkingsOdds ? draftkingsOdds[0].markets[0].outcomes[0].point : false
+            draftkingsLine = draftkingsOdds.length > 0 ? draftkingsOdds[0].markets[0].outcomes[0].point : false
         }
         game['draftkings_line'] = draftkingsLine
     } 
 
-    console.log(gamesMyLines)
+    // console.log(gamesMyLines)
     res.json(gamesMyLines);
 });
 
