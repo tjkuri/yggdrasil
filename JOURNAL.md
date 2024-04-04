@@ -1,5 +1,16 @@
 # Journal
 Need a file to keep track of why I chose to so certain things.
+The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
+
+## 04-03-2024
+Short term todos:
+1. Update to only re-request the status of games that are currently ongoing
+2. Add better error handling, when i was trying to stand something up quickly didnt really do any of this. Dont want to crash, want to handle errors with grace
+
+Long term todos:
+1. Use a database to cache data instead of files. 
+2. Related to the point above, but if we have a better way of storing data, we can add endpoints to fetch how succesful the existing predictions are.
+
 
 ## 03-21-2024
 Going to add some functions to save and retrive from cache. The obvious solution is to add some databases solution but for now since im trying to go fast .json files will do. (maybe next time Ill start at the beginning of the sports season so Im not racing with the end of season)
