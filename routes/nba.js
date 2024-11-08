@@ -33,6 +33,7 @@ async function getLastSixScores(ballDontLieGame){
  */
 async function getTodaysPlays(){
     let gamesToday = await ballDontLieAPI.fetchNbaTodayGames();
+    console.log(gamesToday)
 
     for (let game of gamesToday) {
         const lastSixTotals = await getLastSixScores(game)
@@ -99,7 +100,7 @@ router.get('/totals', async (req, res) => {
     var gamesVegasLines = await retrieveFromCache(oddsFilePath)
 
     if (gamesVegasLines && !reCache) {
-        console.log('Using cached data from:' + oddsFilePath);
+        console.log('Using cached data for nba odds from:' + oddsFilePath);
     }
     else{
         gamesVegasLines = await theOddsApi.fetchNbaTodayLines();
@@ -109,8 +110,8 @@ router.get('/totals', async (req, res) => {
 
     const myLineFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-my-lines.json' // get the date for today to use as out filename
     let gamesMyLines = await retrieveFromCache(myLineFilePath);
-    if (gamesMyLines && !reCache) {
-        console.log('Using cached data from:' + myLineFilePath);
+    if (gamesMyLines && !true) {
+        console.log('Using cached data for my lines from:' + myLineFilePath);
     }
     else{
         gamesMyLines = await getTodaysPlays();
