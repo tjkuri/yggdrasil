@@ -4,6 +4,8 @@ const utils = require('../utils/utils');
 
 require('dotenv').config(); //allows us to import variables from .env
 const ballDontLieKey = process.env.BALLDONTLIE_KEY;
+const nba_season = process.env.NBA_SEASON || '2024';
+
 
 module.exports = {
     fetchNbaTodayGames, getLastThreeGames, getTeamIdMap
@@ -22,7 +24,7 @@ async function fetchNbaTodayGames() {
         },
         params: {
             per_page: 25, // Theres should never be more that this many nba games in a day
-            seasons: [2023], // need this here otherwise itll return a bunch of empty pages. looks like inseason tournament is included
+            seasons: [nba_season], // need this here otherwise itll return a bunch of empty pages. looks like inseason tournament is included
             dates: [utils.getToday10AMEST().slice(0, 10)],
         }
     }
@@ -93,7 +95,7 @@ async function getLastThreeGames(teamFullName, teamId) {
         params: {
             team_ids: [teamId],
             per_page: 100,
-            seasons: [2023], // need this here otherwise itll return a bunch of empty pages. looks like inseason tournament is included
+            seasons: [nba_season], // need this here otherwise itll return a bunch of empty pages. looks like inseason tournament is included
             end_date: utils.getYesterdayEST(), // games that occurred up through yesterday
         }
     }
