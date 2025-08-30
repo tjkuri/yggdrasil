@@ -1,5 +1,7 @@
 const express = require('express');
-const nbaAPI = require('./routes/nba'); //modules for handling request to /api/nba endpoint
+const nbaRoutes = require('./routes/nba'); //modules for handling request to /api/nba endpoint
+const nflRoutes = require("./routes/nfl"); //TODO
+
 
 require('dotenv').config(); //allows us to import variables from .env
 
@@ -20,7 +22,10 @@ app.use(function (req, res, next) {
 });
 
 // Mount the router on the desired path (optional, defaults to '/')
-app.use('/api/nba', nbaAPI);
+app.use('/api/nba', nbaRoutes);
+// TODO
+app.use("/api/nfl", nflRoutes);
+
 
 // Example Hello World route
 app.get('/', (req, res) => {
