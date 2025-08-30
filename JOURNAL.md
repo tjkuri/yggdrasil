@@ -2,6 +2,32 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2025-08-30
+
+**What changed**
+- Added NFL roster pipeline + endpoint:
+  - `services/nflverseRoster.js` pulls `roster_{season}.csv` from nflverse releases with a 12h in-memory TTL cache.
+  - `routes/nfl.js` exposes `GET /api/nfl/qbs?season=&active=&startersOnly=&limit=`.
+  - Each QB includes a canonical `id` (pref GSIS), a friendly `slug` (`last-first`), `team_abbr`, `isActive`.
+- Mounted NFL routes in `server.js` and kept NBA routing intact.
+- Dependencies: added `cors` and `csv-parse`, bumped `axios`, added `npm start`.
+- Tiny cache util: `utils/cache.js`.
+
+**Decisions**
+- `isStarter`: not reliable from the 2025 roster CSV (no depth order). We’re currently setting `isStarter: false` and not gating UI on it.
+- Introduced `slug` to keep stable quick-pick identifiers (`mahomes-patrick`, `allen-joshua`, etc.), while `id` stays a canonical provider ID.
+- Fall back to previous season’s roster if current season file isn’t available yet.
+
+**Why**
+- Provide a real QB list to the frontend (instead of a stub), while keeping quick-picks working despite provider ID quirks.
+- Keep the server simple + fast with CSV → JSON normalization and TTL caching.
+
+**Next up**
+- Add `/api/nfl/qb/passing-yards?player=&line=` using nflverse **player_stats** CSVs; return summaries + histograms.
+- (Optional) Derive likely starters by team using last season’s starts/attempts, and annotate the roster output.
+- Improve errors/observability: add `/api/nfl/health` details, basic logging, and response schemas.
+
+
 ## 04-03-2024
 Short term todos:
 1. Update to only re-request the status of games that are currently ongoing
