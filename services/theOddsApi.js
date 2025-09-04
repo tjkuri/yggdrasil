@@ -4,10 +4,38 @@ const fs = require('fs');
 
 require('dotenv').config(); //allows us to import variables from .env
 const oddsApiKey = process.env.ODDS_API_KEY;
+const ODDS_API_KEY = process.env.ODDS_API_KEY;
+const ODDS_HOST = process.env.ODDS_HOST || "https://api.the-odds-api.com";
 
 module.exports = {
-    fetchNbaTodayGames, fetchNbaTodayLines
+    fetchNbaTodayGames, fetchNbaTodayLines, listNflEvents, getEventOdds
 };
+
+/**
+ * Free: list in-play & pre-match events (home/away/commence_time/id).
+ * 0 credits per docs.
+ */
+async function listNflEvents() {
+  if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY");
+  const url = `${ODDS_HOST}/v4/sports/americanfootball_nfl/events`;
+  const res = await axios.get(url, { params: { apiKey: ODDS_API_KEY } });
+  return { data: res.data, headers: res.headers };
+}
+
+/**
+ * Paid: one event, one market, one region (1 credit).
+ * We ask only for player_pass_yds in region 'us' to keep costs minimal.
+ */
+async function getEventOdds(eventId, { market = "player_pass_yds", regions = "us", oddsFormat = "american" } = {}) {
+  if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY");
+  const url = `${ODDS_HOST}/v4/sports/americanfootball_nfl/events/${eventId}/odds`;
+  const res = await axios.get(url, {
+    params: { apiKey: ODDS_API_KEY, regions, markets: market, oddsFormat }
+  });
+  return { data: res.data, headers: res.headers };
+}
+
+
 
 /**
  * Use Odds-API to fetch a list of NBA games scheduled for today (start time is between 10AM - 1130PM)

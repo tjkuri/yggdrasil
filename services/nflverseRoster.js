@@ -8,6 +8,7 @@ const TTL_MS = 1000 * 60 * 60 * 12; // 12h
 module.exports = {
   loadRosterForSeasonPreferCurrent,
   extractQBs,
+  getQBs
 };
 
 
@@ -99,4 +100,19 @@ function extractQBs(rows) {
       };
     });
 }
+
+
+async function getQBs(season, { activeOnly = true } = {}) {
+  const rows = await loadRosterForSeasonPreferCurrent(season);
+  let qbs = extractQBs(rows);
+  if (activeOnly) qbs = qbs.filter(p => p.isActive);
+  // Sort: team, then name (starters first if you ever set isStarter)
+  qbs.sort((a, b) => {
+    if (a.isStarter !== b.isStarter) return a.isStarter ? -1 : 1;
+    if (a.team_abbr !== b.team_abbr) return a.team_abbr.localeCompare(b.team_abbr);
+    return a.name.localeCompare(b.name);
+  });
+  return { season, players: qbs };
+}
+
 
