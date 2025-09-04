@@ -464,4 +464,231 @@ router.get("/qb/passing-yards", async (req, res) => {
   }
 });
 
+
+// GET /api/nfl/qb/analysis?playerId=...&refreshOdds=true|false&minAttempts=10[&line=246.5]
+router.get("/qb/analysis", async (req, res) => {
+  try {
+    const { playerId } = req.query;
+    if (!playerId) return res.status(400).json({ error: "playerId is required" });
+
+    const refreshOdds = String(req.query.refreshOdds).toLowerCase() === "true";
+    const minAttempts = req.query.minAttempts != null ? Number(req.query.minAttempts) : 10;
+    const lineOverride = req.query.line != null ? Number(req.query.line) : null;
+
+    // ---------- Resolve player ----------
+    const year = new Date().getFullYear();
+    const { players } = await roster.getQBs(year);
+    const player =
+      players.find(p => p.id === playerId) ||
+      players.find(p => p.slug === playerId);
+    if (!player) return res.status(404).json({ error: "Player not found in roster", year });
+
+    const teamFull = TEAM_BY_ABBR[player.team_abbr] || player.team_abbr;
+
+    // ---------- Odds (manual-refresh policy) ----------
+    let event = null;
+    let oddsPayload = null;
+
+    // Use free events list to find next game
+    const { data: events } = await getEventsCached();
+    event = findNextEventForTeam(events, teamFull);
+
+    if (!event) {
+      // No upcoming game → no odds; continue to distributions with line override (if any)
+      oddsPayload = {
+        market: "player_pass_yds",
+        region: "us",
+        consensus_line: null,
+        book_count: 0,
+        books: [],
+        as_of: null,
+        cache: { hit: true, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
+        credits: null,
+        no_upcoming_game: true,
+      };
+    } else {
+      const ODDS_CACHE_KEY = `odds:nfl:${event.id}:player_pass_yds:us`;
+      const cached = cache.get(ODDS_CACHE_KEY);
+      const wantsRefresh = refreshOdds;
+
+      async function fetchAndCacheOdds() {
+        if (inflight.has(ODDS_CACHE_KEY)) return await inflight.get(ODDS_CACHE_KEY);
+        const p = (async () => {
+          const { data, headers } = await getEventOdds(event.id, { market: "player_pass_yds", regions: "us" });
+          const meta = {
+            fetchedAt: new Date().toISOString(),
+            headers: {
+              x_last: headers["x-requests-last"],
+              x_used: headers["x-requests-used"],
+              x_remaining: headers["x-requests-remaining"],
+            },
+          };
+          cache.set(ODDS_CACHE_KEY, { data, meta }); // manual-refresh: no TTL eviction
+          return { data, meta };
+        })();
+        inflight.set(ODDS_CACHE_KEY, p);
+        try { return await p; } finally { inflight.delete(ODDS_CACHE_KEY); }
+      }
+
+      let oddsBlob, oddsMeta, cacheHit = false, seeded = false;
+      if (cached && !wantsRefresh) {
+        oddsBlob = cached.data;
+        oddsMeta = cached.meta;
+        cacheHit = true;
+      } else if (!cached) {
+        const out = await fetchAndCacheOdds(); // seed once
+        oddsBlob = out.data; oddsMeta = out.meta; seeded = true;
+      } else if (wantsRefresh) {
+        const out = await fetchAndCacheOdds(); // manual refresh
+        oddsBlob = out.data; oddsMeta = out.meta;
+      }
+
+      // Extract this QB's pass-yds market
+      const books = [];
+      for (const b of oddsBlob.bookmakers || []) {
+        const m = (b.markets || []).find(mk => mk.key === "player_pass_yds");
+        if (!m) continue;
+        const outs = (m.outcomes || []).filter(o => isSamePlayer(o.description || o.name || "", player.name));
+        if (!outs.length) continue;
+
+        // pair O/U by point
+        const byPoint = new Map();
+        for (const o of outs) {
+          const k = Number.isFinite(o.point) ? String(o.point) : "nopoint";
+          const prev = byPoint.get(k) || {};
+          const nm = (o.name || "").toLowerCase();
+          if (nm === "over") prev.over = o;
+          else if (nm === "under") prev.under = o;
+          prev.point = o.point;
+          byPoint.set(k, prev);
+        }
+        const candidates = [...byPoint.values()].filter(x => typeof x.point === "number");
+        const best = candidates.find(x => x.over && x.under) || candidates[0] || null;
+        if (!best) continue;
+
+        books.push({
+          book: b.key,
+          book_title: b.title,
+          point: typeof best.point === "number" ? best.point : null,
+          price_over: best.over?.price ?? null,
+          price_under: best.under?.price ?? null,
+          last_update: b.last_update || null,
+        });
+      }
+
+      const points = books.map(b => b.point).filter(n => typeof n === "number");
+      const consensus = median(points);
+
+      // Dispersion
+      const arr = points.slice().sort((a, b) => a - b);
+      const points_min = arr.length ? arr[0] : null;
+      const points_max = arr.length ? arr[arr.length - 1] : null;
+      const q1 = qtile(arr, 0.25);
+      const q3 = qtile(arr, 0.75);
+      const iqr = (q1 != null && q3 != null) ? Number((q3 - q1).toFixed(1)) : null;
+      const range = (points_min != null && points_max != null) ? Number((points_max - points_min).toFixed(1)) : null;
+
+      oddsPayload = {
+        market: "player_pass_yds",
+        region: "us",
+        consensus_line: consensus,
+        book_count: books.length,
+        books,
+        points_min,
+        points_max,
+        points_range: range,
+        points_q1: q1,
+        points_q3: q3,
+        points_iqr: iqr,
+        as_of: oddsMeta?.fetchedAt || null,
+        cache: {
+          hit: cacheHit,
+          seeded_on_miss: seeded,
+          key: ODDS_CACHE_KEY,
+          age_minutes: oddsMeta?.fetchedAt ? Math.round((Date.now() - Date.parse(oddsMeta.fetchedAt)) / 60000) : null,
+          needs_refresh: false,
+        },
+        credits: oddsMeta?.headers || null,
+      };
+    }
+
+    // ---------- Distributions (career / last / current) ----------
+    const lineForAnalysis = lineOverride != null ? lineOverride : (oddsPayload?.consensus_line ?? null);
+
+    // Load current + last
+    const current = year;
+    const last = year - 1;
+    const minSeason = 2009;
+
+    const [currRows, lastRows] = await Promise.all([
+      stats.loadQBPassYardsBySeasons(player, [current]),
+      stats.loadQBPassYardsBySeasons(player, [last]),
+    ]);
+
+    // Build career by walking back
+    const careerSeasons = [];
+    const careerValues = [];
+    let consecutiveMisses = 0;
+    for (let s = current; s >= minSeason; s--) {
+      let rows;
+      if (s === current) rows = currRows;
+      else if (s === last) rows = lastRows;
+      else rows = await stats.loadQBPassYardsBySeasons(player, [s]);
+
+      const vals = rows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+      if (vals.length > 0) {
+        careerSeasons.push(s);
+        careerValues.push(...vals);
+        consecutiveMisses = 0;
+      } else {
+        consecutiveMisses++;
+        if (consecutiveMisses >= 6) break;
+      }
+    }
+
+    const scopeCurrent = currRows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+    const scopeLast = lastRows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+
+    const distributions = {
+      attempts_threshold: minAttempts,
+      scopes: {
+        current_season: {
+          seasons_used: scopeCurrent.length ? [current] : [],
+          ...summarize(scopeCurrent, lineForAnalysis),
+        },
+        last_season: {
+          seasons_used: scopeLast.length ? [last] : [],
+          ...summarize(scopeLast, lineForAnalysis),
+        },
+        career: {
+          seasons_used: careerSeasons.sort((a, b) => a - b),
+          ...summarize(careerValues, lineForAnalysis),
+        },
+      },
+    };
+
+    // ---------- Respond ----------
+    return res.json({
+      player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
+      event: event ? {
+        id: event.id,
+        home_team: event.home_team,
+        away_team: event.away_team,
+        commence_time: event.commence_time,
+      } : null,
+      odds: oddsPayload,
+      distributions,
+      as_of: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("qb/analysis error:", err?.response?.data || err.message);
+    const status = err?.response?.status || 500;
+    return res.status(status).json({
+      error: "Failed to build QB analysis",
+      detail: err?.response?.data || err.message,
+    });
+  }
+});
+
+
 module.exports = router;
