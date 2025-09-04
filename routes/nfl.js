@@ -3,6 +3,8 @@ const express = require("express");
 const router = express.Router();
 
 const { loadRosterForSeasonPreferCurrent, extractQBs } = require("../services/nflverseRoster");
+const stats = require("../services/nflverseStats");
+
 const { listNflEvents, getEventOdds } = require("../services/theOddsApi");
 const TEAM_BY_ABBR = require("../services/nflTeamNames");
 const roster = require("../services/nflverseRoster");
@@ -266,5 +268,200 @@ router.get("/qb/line", async (req, res) => {
   }
 });
 
+// ---- math helpers ----
+function mean(a) { return a.length ? a.reduce((s, x) => s + x, 0) / a.length : null; }
+function median(sorted) {
+  if (!sorted.length) return null;
+  const m = Math.floor(sorted.length / 2);
+  return (sorted.length % 2) ? sorted[m] : (sorted[m - 1] + sorted[m]) / 2;
+}
+function quantile(sorted, q) {
+  if (!sorted.length) return null;
+  const pos = (sorted.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  return sorted[base + 1] !== undefined
+    ? sorted[base] + rest * (sorted[base + 1] - sorted[base + 1] + sorted[base + 1]) // placeholder to avoid eslint warnings
+    : sorted[base];
+}
+// Fix the quantile formula (copy with care)
+function qtile(sorted, q) {
+  if (!sorted.length) return null;
+  const pos = (sorted.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  return sorted[base + 1] !== undefined
+    ? sorted[base] + rest * (sorted[base + 1] - sorted[base])
+    : sorted[base];
+}
+function stdevSample(a) {
+  const m = mean(a);
+  if (m == null || a.length < 2) return null;
+  const v = a.reduce((s, x) => s + Math.pow(x - m, 2), 0) / (a.length - 1);
+  return Math.sqrt(v);
+}
+function percentileOfValue(sorted, x) {
+  if (!sorted.length || x == null) return null;
+  let c = 0;
+  for (const v of sorted) if (v <= x) c++;
+  return c / sorted.length;
+}
+function histogram(values) {
+  if (!values.length) return [];
+  const min = Math.min(...values), max = Math.max(...values);
+  if (min === max) return [{ start: min, end: min, count: values.length }];
+  const n = values.length;
+  const bins = Math.min(20, Math.max(8, Math.ceil(Math.sqrt(n))));
+  const width = (max - min) / bins;
+  const edges = Array.from({ length: bins + 1 }, (_, i) => min + i * width);
+  const counts = Array(bins).fill(0);
+  for (const v of values) {
+    let idx = Math.floor((v - min) / width);
+    if (idx >= bins) idx = bins - 1; // include max in last bin
+    counts[idx]++;
+  }
+  return counts.map((c, i) => ({
+    start: Number(edges[i].toFixed(1)),
+    end: Number(edges[i + 1].toFixed(1)),
+    count: c,
+  }));
+}
+
+// ---- scope computation ----
+function summarize(values, line) {
+  const vals = values.slice().sort((a, b) => a - b);
+  const n = vals.length;
+  const mu = mean(vals);
+  const med = median(vals);
+  const sd = stdevSample(vals);
+  const p10 = qtile(vals, 0.10);
+  const p25 = qtile(vals, 0.25);
+  const p50 = qtile(vals, 0.50);
+  const p75 = qtile(vals, 0.75);
+  const p90 = qtile(vals, 0.90);
+  const min = n ? vals[0] : null;
+  const max = n ? vals[n - 1] : null;
+
+  let p_over = null, p_under = null, z_score = null, percentile = null;
+  if (n) {
+    if (line != null) {
+      const over = vals.filter(v => v > line).length;
+      const under = vals.filter(v => v < line).length;
+      p_over = over / n;
+      p_under = under / n;
+      if (sd && sd > 0 && mu != null) z_score = (line - mu) / sd;
+      percentile = percentileOfValue(vals, line);
+    }
+  }
+
+  return {
+    n,
+    mean: mu != null ? Number(mu.toFixed(1)) : null,
+    median: med != null ? Number(med.toFixed(1)) : null,
+    stdev: sd != null ? Number(sd.toFixed(1)) : null,
+    p10: p10 != null ? Number(p10.toFixed(1)) : null,
+    p25: p25 != null ? Number(p25.toFixed(1)) : null,
+    p50: p50 != null ? Number(p50.toFixed(1)) : null,
+    p75: p75 != null ? Number(p75.toFixed(1)) : null,
+    p90: p90 != null ? Number(p90.toFixed(1)) : null,
+    min, max,
+    histogram: histogram(vals),
+    p_over, p_under,
+    z_score: z_score != null ? Number(z_score.toFixed(2)) : null,
+    percentile: percentile != null ? Number((percentile * 100).toFixed(1)) : null
+  };
+}
+
+/**
+ * GET /api/nfl/qb/passing-yards?playerId=...&line=246.5&minAttempts=10
+ * Scopes: current, last, career (REG only). Attempts filter default 10.
+ */
+router.get("/qb/passing-yards", async (req, res) => {
+  try {
+    const { playerId } = req.query;
+    const line = req.query.line != null ? Number(req.query.line) : null;
+    const minAttempts = req.query.minAttempts != null ? Number(req.query.minAttempts) : 10;
+    if (!playerId) return res.status(400).json({ error: "playerId is required" });
+
+    // Resolve player from roster
+    const year = new Date().getFullYear();
+    const { players } = await roster.getQBs(year);
+    const player =
+      players.find(p => p.id === playerId) ||
+      players.find(p => p.slug === playerId);
+    if (!player) return res.status(404).json({ error: "Player not found in roster", year });
+
+    const teamFull = TEAM_BY_ABBR[player.team_abbr] || player.team_abbr;
+
+    // Seasons to consider
+    const current = year;
+    const last = year - 1;
+    const minSeason = 2009; // guardrail for oldest available datasets
+
+    // Load current + last at once
+    const [currRows, lastRows] = await Promise.all([
+      stats.loadQBPassYardsBySeasons(player, [current]),
+      stats.loadQBPassYardsBySeasons(player, [last]),
+    ]);
+
+    // Build "career": walk back seasons until no data for a while
+    const careerSeasons = [];
+    const careerValues = [];
+    let consecutiveMisses = 0;
+    for (let s = current; s >= minSeason; s--) {
+      let rows;
+      if (s === current) rows = currRows;
+      else if (s === last) rows = lastRows;
+      else rows = await stats.loadQBPassYardsBySeasons(player, [s]);
+
+      const vals = rows
+        .filter(r => (r.attempts ?? 0) >= minAttempts)
+        .map(r => r.yards);
+
+      if (vals.length > 0) {
+        careerSeasons.push(s);
+        careerValues.push(...vals);
+        consecutiveMisses = 0;
+      } else {
+        consecutiveMisses++;
+        if (consecutiveMisses >= 6) break; // break after a long gap
+      }
+    }
+
+    // Filter to attempts for each scope
+    const scopeCurrent = currRows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+    const scopeLast = lastRows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+
+    const out = {
+      player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
+      line: line ?? null,
+      attempts_threshold: minAttempts,
+      scopes: {
+        current_season: {
+          seasons_used: scopeCurrent.length ? [current] : [],
+          ...summarize(scopeCurrent, line),
+        },
+        last_season: {
+          seasons_used: scopeLast.length ? [last] : [],
+          ...summarize(scopeLast, line),
+        },
+        career: {
+          seasons_used: careerSeasons.sort((a, b) => a - b),
+          ...summarize(careerValues, line),
+        },
+      },
+      as_of: new Date().toISOString(),
+    };
+
+    res.json(out);
+  } catch (err) {
+    console.error("qb/passing-yards error:", err?.response?.data || err.message);
+    const status = err?.response?.status || 500;
+    res.status(status).json({
+      error: "Failed to build passing-yards distributions",
+      detail: err?.response?.data || err.message,
+    });
+  }
+});
 
 module.exports = router;
