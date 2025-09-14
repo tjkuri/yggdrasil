@@ -3,7 +3,7 @@ const axios = require("axios");
 const { parse } = require("csv-parse");
 const cache = require("../utils/cache");
 
-const BASE = "https://github.com/nflverse/nflverse-data/releases/download/player_stats";
+const BASE = "https://github.com/nflverse/nflverse-data/releases/download/stats_player";
 
 const TTL_MS = 1000 * 60 * 60 * 12; // 12h
 module.exports = {
