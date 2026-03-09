@@ -2,6 +2,28 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-03-08
+
+**What changed**
+- Ripped out BallDontLie, replaced with ESPN's unofficial scoreboard + team schedule endpoints. No API key, no rate limit.
+- New `services/espnNbaApi.js`: `fetchTodayScoreboard()` (5-min in-memory TTL) and `fetchLastNTeamGames(teamId, n)` (1h TTL). Team IDs come straight off the scoreboard response so no static mapping needed.
+- Moved all the computation (recommendation, discrepancy, record) to the backend. Frontend just renders now.
+- Fixed the long-standing `!true` cache bug on my-lines that was forcing a full refetch every single request.
+- Deleted `services/ballDontLieApi.js`.
+
+**Decisions**
+- Originally planned to use hoopR-nba-data CSV releases (same pattern as nflverse) but the repo has no releases. ESPN is the upstream source for hoopR anyway so just went direct.
+- Season year detection: Oct+ → next calendar year, otherwise current year. Matches ESPN's convention.
+
+**Why**
+- BallDontLie tightened its free tier to 5 req/min and the cache bug meant we were firing ~21 calls per request. Wasn't worth patching, the architecture needed a real fix.
+- ESPN gives us live scores too which was a nice bonus — in-progress games now show the current score on the card.
+
+**Next up**
+- Could add a `?refresh=true` param to force a my-lines cache bust, same as the NFL odds endpoint has.
+- File cache is still date-keyed which works fine. Would be cleaner to purge old files eventually.
+
+
 ## 2025-08-30
 
 **What changed**

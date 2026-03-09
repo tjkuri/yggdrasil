@@ -1,136 +1,122 @@
 const express = require('express');
-const router = express.Router(); // Create an Express Router instance
-const axios = require('axios');
+const router = express.Router();
 const fs = require('fs');
 
 const utils = require('../utils/utils');
-const ballDontLieAPI = require('../services/ballDontLieApi');
+const espnNbaApi = require('../services/espnNbaApi');
 const theOddsApi = require('../services/theOddsApi');
+const { mean } = require('../utils/nflMath');
 
-/**
- * Given a BallDontLieAPI JSON representaiton of an NBA game, determine what my line for the total score is
- * @param {object} ballDontLieGame - BallDontLieAPI JSON representaiton of an NBA game
- * @returns {float} - My Line
- */
-async function getLastSixScores(ballDontLieGame){
-    let teamMap = await ballDontLieAPI.getTeamIdMap();
-    let homeTeamName = ballDontLieGame.home_team.full_name
-    let awayTeamName = ballDontLieGame.visitor_team.full_name
-
-    // Fetch the last 3 non OT games that each team played in
-    let home3gram = await ballDontLieAPI.getLastThreeGames(homeTeamName, teamMap[homeTeamName.split(" ").pop()])
-    let away3gram = await ballDontLieAPI.getLastThreeGames(awayTeamName, teamMap[awayTeamName.split(" ").pop()])
-    
-    const game_total = (game) => game.home_team_score + game.visitor_team_score;
-
-    const lastSix = home3gram.concat(away3gram)
-    return lastSix.map(game_total)
+async function addToCache(data, filePath) {
+  await fs.promises.writeFile(filePath, JSON.stringify(data), 'utf-8');
 }
 
-/**
- * Fetch  JSON representaiton of an NBA games played today with my line inlcuded as a field
- * @returns {Array<object>} - NBA game jsons with my line
- */
-async function getTodaysPlays(){
-    let gamesToday = await ballDontLieAPI.fetchNbaTodayGames();
-    console.log(gamesToday)
-
-    for (let game of gamesToday) {
-        const lastSixTotals = await getLastSixScores(game)
-        let  myLine = lastSixTotals.reduce((partialSum, a) => partialSum + a, 0) / 6;
-        game['myLine'] = myLine.toFixed(2);
-        game['lastSix'] = lastSixTotals
-    }
-    return gamesToday
-}
-
-/**
- * Given a home team, return the OddsAPI game from the list of games that matches, false if non is present.
- * @param {Array<object>} oddsApiGames - List of OddsAPI game objects
- * @param {string} homeTeam - Home team name of the desired game to find.
- * @returns {object | boolean} - Game object of the the matching game, false if none is found
- */
-function findOddsApiGameByHomeTeam(oddsApiGames, homeTeam) {
-    for (const game of oddsApiGames) {
-      if (game.home_team.split(" ").pop() === homeTeam.split(" ").pop()) {
-        return game;
-      }
-    }
-    return false;
+async function retrieveFromCache(filePath) {
+  if (fs.existsSync(filePath)) {
+    const raw = await fs.promises.readFile(filePath);
+    return JSON.parse(raw);
   }
-
-  /**
-   * Write the stringified data to the sepcified file
-   * @param {*} data - Data to be cached
-   * @param {*} file_name - Path to file where data should be cached
-   */
-async function addToCache(data, file_name){
-    await fs.promises.writeFile(file_name, JSON.stringify(data), 'utf-8');
-    //TODO: should probably add some error catching here?
+  return null;
 }
 
-/**
- * Retrieve data from the specified file cache
- * @param {*} file_path 
- * @returns {object} data at the specified path if it exists, false otherwise
- */
-async function retrieveFromCache(file_path){
-    if (fs.existsSync(file_path)) {
-        console.log('Using cached data from file');
-        const cachedData = await fs.promises.readFile(file_path);
-        return JSON.parse(cachedData);
-    }
-    return false;
+function findOddsGameByHomeTeam(oddsGames, homeTeamName) {
+  for (const g of oddsGames) {
+    if (g.home_team.split(' ').pop() === homeTeamName.split(' ').pop()) return g;
+  }
+  return null;
 }
 
-// misc. endpoint used for testing and dev
-router.get('/testing', async (req, res) => {
-    let foo = await getTodaysPlays();
-    res.json(foo);
-});  
+function computeRecord(lastSix, dkLine, recommendation) {
+  let wins = 0, pushes = 0, losses = 0;
+  for (const total of lastSix) {
+    if (total === dkLine) { pushes++; continue; }
+    const wentOver = total > dkLine;
+    if ((recommendation === 'O' && wentOver) || (recommendation === 'U' && !wentOver)) wins++;
+    else losses++;
+  }
+  return { wins, pushes, losses };
+}
 
-
-// Handle GET requests for endpoint `/api/nba/totals`
-// Return Every NBA game for today with my line and the sportsbook lines
+// GET /api/nba/totals
+// Returns today's NBA games with my line, DK line, recommendation, record
 router.get('/totals', async (req, res) => {
-    // await new Promise(resolve => setTimeout(resolve, 5000)); //TODO: REMOVE, only using this for frontend testing
+  try {
+    const today = utils.getToday10AMEST().slice(0, 10);
 
-    const reCache = false;
-    const oddsFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-total-odds.json' // get the date for today to use as out filename
-    var gamesVegasLines = await retrieveFromCache(oddsFilePath)
-
-    if (gamesVegasLines && !reCache) {
-        console.log('Using cached data for nba odds from:' + oddsFilePath);
-    }
-    else{
-        gamesVegasLines = await theOddsApi.fetchNbaTodayLines();
-        addToCache(gamesVegasLines, oddsFilePath)
+    // --- Odds (file-cached daily) ---
+    const oddsFilePath = `cache/${today}-nba-total-odds.json`;
+    let gamesVegasLines = await retrieveFromCache(oddsFilePath);
+    if (!gamesVegasLines) {
+      gamesVegasLines = await theOddsApi.fetchNbaTodayLines();
+      addToCache(gamesVegasLines, oddsFilePath);
     }
 
+    // --- Live scoreboard (5-min in-memory TTL via espnNbaApi) ---
+    const scoreboard = await espnNbaApi.fetchTodayScoreboard();
+    const scoreboardById = Object.fromEntries(scoreboard.map(g => [g.id, g]));
 
-    const myLineFilePath = 'cache/' + utils.getToday10AMEST().slice(0,10) + '-nba-my-lines.json' // get the date for today to use as out filename
-    let gamesMyLines = await retrieveFromCache(myLineFilePath);
-    if (gamesMyLines && !true) {
-        console.log('Using cached data for my lines from:' + myLineFilePath);
+    // --- My lines (file-cached daily — only last_six, not live fields) ---
+    const myLineFilePath = `cache/${today}-nba-my-lines.json`;
+    let myLineData = await retrieveFromCache(myLineFilePath);
+    if (!myLineData) {
+      myLineData = [];
+      for (const game of scoreboard) {
+        const [homeGames, awayGames] = await Promise.all([
+          espnNbaApi.fetchLastNTeamGames(game.home_team.id, 3),
+          espnNbaApi.fetchLastNTeamGames(game.away_team.id, 3),
+        ]);
+        const lastSix = [...homeGames, ...awayGames].map(g => g.total).filter(t => t != null);
+        myLineData.push({ id: game.id, home_team: game.home_team, away_team: game.away_team, last_six: lastSix });
+      }
+      addToCache(myLineData, myLineFilePath);
     }
-    else{
-        gamesMyLines = await getTodaysPlays();
-        addToCache(gamesMyLines, myLineFilePath)
-    }
 
-    for (let game of gamesMyLines) {
-        matchingGame = findOddsApiGameByHomeTeam(gamesVegasLines, game.home_team.full_name)
-        let draftkingsLine = false
-        if(matchingGame){
-            let draftkingsOdds = matchingGame.bookmakers.filter((book) => book.key === 'draftkings')
-            draftkingsLine = draftkingsOdds.length > 0 ? draftkingsOdds[0].markets[0].outcomes[0].point : false
-        }
-        game['draftkings_line'] = draftkingsLine
-    } 
+    // --- Merge odds + pre-compute stats ---
+    const result = myLineData.map(game => {
+      // Always use live scoreboard for status/scores
+      const live = scoreboardById[game.id] || {};
+      const oddsGame = findOddsGameByHomeTeam(gamesVegasLines, game.home_team.name);
+      let dkLine = null;
+      if (oddsGame) {
+        const dk = oddsGame.bookmakers.find(b => b.key === 'draftkings');
+        if (dk) dkLine = dk.markets[0]?.outcomes[0]?.point ?? null;
+      }
 
-    // console.log(gamesMyLines)
-    res.json(gamesMyLines);
+      const lastSix = game.last_six || [];
+      const myLine = lastSix.length ? parseFloat(mean(lastSix).toFixed(2)) : null;
+      const discrepancy = myLine != null && dkLine != null
+        ? parseFloat((myLine - dkLine).toFixed(2))
+        : null;
+      const recommendation = myLine != null && dkLine != null
+        ? (myLine >= dkLine ? 'O' : 'U')
+        : null;
+      const record = recommendation != null && dkLine != null
+        ? computeRecord(lastSix, dkLine, recommendation)
+        : null;
+
+      return {
+        id: game.id,
+        status: live.status,
+        status_detail: live.status_detail,
+        period: live.period,
+        home_team: game.home_team,
+        away_team: game.away_team,
+        home_score: live.home_score,
+        away_score: live.away_score,
+        my_line: myLine,
+        dk_line: dkLine,
+        discrepancy,
+        recommendation,
+        last_six: lastSix,
+        record,
+      };
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error('[nba/totals]', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Export the router to be used in your main server file
 module.exports = router;

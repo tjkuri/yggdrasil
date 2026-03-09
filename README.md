@@ -9,11 +9,8 @@ Have a [Journal.md](JOURNAL.md) file where I try to keep track of some lessons l
 ## If you want to run this
 
 ### .env
-Requires the following values in a .env file. The keys are for api services: [odds-api](https://the-odds-api.com) and [balldontlie](https://www.balldontlie.io/#introduction)
-Also need to specify the current nba season (e.g. 2024-2025 season would need 2024 as the value) as it is needed in some of the API calls.
+Requires the following values in a .env file. NBA game data now comes from the ESPN unofficial API (no key needed). Only The Odds API key is required.
 ```bash
-# will need to get api keys for each of these services
-BALLDONTLIE_KEY=<KEY>
 ODDS_API_KEY=<KEY>
-NBA_SEASON=<YEAR>  #defaults to 2024
+ODDS_HOST=https://api.the-odds-api.com  # optional, defaults to this
 ```

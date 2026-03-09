@@ -24,7 +24,7 @@ routes/
   nba.js              # GET /api/nba/totals — today's games with my line vs DK odds
   nfl.js              # GET /api/nfl/qbs, /qb/line, /qb/passing-yards, /qb/analysis
 services/
-  ballDontLieApi.js   # NBA game/team data via BallDontLie API
+  espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h TTL)
   theOddsApi.js       # Sportsbook odds (NBA totals, NFL passing yards) via The Odds API
   nflverseRoster.js   # NFL roster CSVs from nflverse GitHub releases (12h TTL cache)
   nflverseStats.js    # NFL weekly player stats CSVs from nflverse (12h TTL cache); exports buildScopedDistributions
@@ -40,11 +40,9 @@ utils/
 ## Environment Variables (.env)
 
 ```
-BALLDONTLIE_KEY   # NBA game data
 ODDS_API_KEY      # The Odds API (paid, credit-limited)
 ODDS_HOST         # https://api.the-odds-api.com
 ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
-NBA_SEASON        # e.g. 2025
 ```
 
 ## Key Patterns
@@ -68,10 +66,11 @@ NBA_SEASON        # e.g. 2025
 5. Return player + event + odds + distributions + timestamp
 
 **NBA data flow for `/api/nba/totals`**:
-1. Fetch today's games (BallDontLie)
-2. For each game, get last 3 games per team → compute moving average (my line)
-3. Fetch DraftKings odds from The Odds API
-4. Match by home team name; return combined data
+1. Fetch today's scoreboard from ESPN (free, no key, 5-min in-memory TTL)
+2. For each game, fetch last 3 completed regular-season games per team via ESPN team schedule (1h TTL)
+3. Compute `my_line` (mean of 6 totals), `discrepancy`, `recommendation`, `record` in the backend
+4. Fetch DraftKings odds from The Odds API (file-cached daily)
+5. Return enriched games array — frontend just renders
 
 ## Current API Endpoints
 
