@@ -2,6 +2,18 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-03-09
+
+**What changed**
+- Added `?refreshOdds=true` to `/api/nba/totals`. On refresh, fresh odds are merged with the existing cache rather than replacing it — finished games disappear from The Odds API but their lines are preserved by keeping any cached entry not present in the fresh response.
+- Added opening line snapshot (`*-nba-total-odds-open.json`): written once on first fetch of the day, never overwritten. Used to detect line movement. Response now includes `line_movement: { from, to }` when the DK line has shifted.
+- Added `date` field (ESPN game start time) to scoreboard normalization in `espnNbaApi.js`.
+
+**Why**
+- Refresh was overwriting the full odds cache with whatever The Odds API currently returns, which drops finished games. Merging was the right fix.
+- Opening snapshot enables line movement display without any extra API calls.
+
+
 ## 2026-03-08
 
 **What changed**

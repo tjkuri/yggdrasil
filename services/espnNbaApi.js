@@ -53,6 +53,7 @@ async function fetchTodayScoreboard() {
       },
       home_score: scoreInt(home.score),
       away_score: scoreInt(away.score),
+      date: event.date,  // ISO start time, used for tip-off countdown
     };
   });
 

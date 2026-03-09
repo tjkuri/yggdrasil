@@ -43,13 +43,29 @@ router.get('/totals', async (req, res) => {
   try {
     const today = utils.getToday10AMEST().slice(0, 10);
 
-    // --- Odds (file-cached daily) ---
-    const oddsFilePath = `cache/${today}-nba-total-odds.json`;
+    // --- Odds (file-cached daily, manually refreshable) ---
+    const oddsFilePath     = `cache/${today}-nba-total-odds.json`;
+    const oddsOpenFilePath = `cache/${today}-nba-total-odds-open.json`;
+    const refreshOdds = req.query.refreshOdds === 'true';
+
     let gamesVegasLines = await retrieveFromCache(oddsFilePath);
-    if (!gamesVegasLines) {
-      gamesVegasLines = await theOddsApi.fetchNbaTodayLines();
+    if (!gamesVegasLines || refreshOdds) {
+      const freshOdds = await theOddsApi.fetchNbaTodayLines();
+      // On refresh, merge: keep cached entries for games no longer in fresh response
+      // (finished games disappear from The Odds API but we still want their lines)
+      if (refreshOdds && gamesVegasLines) {
+        const freshIds = new Set(freshOdds.map(g => g.id));
+        gamesVegasLines = [...freshOdds, ...gamesVegasLines.filter(g => !freshIds.has(g.id))];
+      } else {
+        gamesVegasLines = freshOdds;
+      }
       addToCache(gamesVegasLines, oddsFilePath);
+      // Opening snapshot — written once per day, never overwritten
+      if (!fs.existsSync(oddsOpenFilePath)) {
+        addToCache(gamesVegasLines, oddsOpenFilePath);
+      }
     }
+    const oddsOpen = await retrieveFromCache(oddsOpenFilePath);
 
     // --- Live scoreboard (5-min in-memory TTL via espnNbaApi) ---
     const scoreboard = await espnNbaApi.fetchTodayScoreboard();
@@ -82,6 +98,18 @@ router.get('/totals', async (req, res) => {
         if (dk) dkLine = dk.markets[0]?.outcomes[0]?.point ?? null;
       }
 
+      let dkLineOpen = null;
+      if (oddsOpen) {
+        const openGame = findOddsGameByHomeTeam(oddsOpen, game.home_team.name);
+        if (openGame) {
+          const dk = openGame.bookmakers.find(b => b.key === 'draftkings');
+          if (dk) dkLineOpen = dk.markets[0]?.outcomes[0]?.point ?? null;
+        }
+      }
+      const lineMovement = dkLine != null && dkLineOpen != null && dkLine !== dkLineOpen
+        ? { from: dkLineOpen, to: dkLine }
+        : null;
+
       const lastSix = game.last_six || [];
       const myLine = lastSix.length ? parseFloat(mean(lastSix).toFixed(2)) : null;
       const discrepancy = myLine != null && dkLine != null
@@ -99,12 +127,14 @@ router.get('/totals', async (req, res) => {
         status: live.status,
         status_detail: live.status_detail,
         period: live.period,
+        date: live.date,
         home_team: game.home_team,
         away_team: game.away_team,
         home_score: live.home_score,
         away_score: live.away_score,
         my_line: myLine,
         dk_line: dkLine,
+        line_movement: lineMovement,
         discrepancy,
         recommendation,
         last_six: lastSix,
