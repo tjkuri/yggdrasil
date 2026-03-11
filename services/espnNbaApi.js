@@ -25,11 +25,13 @@ function getNbaSeason() {
  * @returns {Array<object>} Normalized array of game objects
  */
 async function fetchTodayScoreboard() {
-  const key = 'espn_nba_scoreboard';
+  // Pass today's local date to ESPN so it never returns yesterday's slate
+  const today = new Date().toLocaleDateString('en-CA').replace(/-/g, ''); // YYYYMMDD
+  const key = `espn_nba_scoreboard_${today}`;
   const cached = cache.get(key, SCOREBOARD_TTL_MS);
   if (cached) return cached;
 
-  const res = await axios.get(SCOREBOARD_URL);
+  const res = await axios.get(`${SCOREBOARD_URL}?dates=${today}`);
   const events = res.data.events || [];
 
   const games = events.map(event => {

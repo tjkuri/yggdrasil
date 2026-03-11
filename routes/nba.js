@@ -116,9 +116,9 @@ router.get('/totals', async (req, res) => {
         ? parseFloat((myLine - dkLine).toFixed(2))
         : null;
       const recommendation = myLine != null && dkLine != null
-        ? (myLine >= dkLine ? 'O' : 'U')
+        ? (myLine > dkLine ? 'O' : myLine < dkLine ? 'U' : 'P')
         : null;
-      const record = recommendation != null && dkLine != null
+      const record = recommendation != null && recommendation !== 'P' && dkLine != null
         ? computeRecord(lastSix, dkLine, recommendation)
         : null;
 

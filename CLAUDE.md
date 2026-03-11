@@ -66,9 +66,9 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 5. Return player + event + odds + distributions + timestamp
 
 **NBA data flow for `/api/nba/totals`**:
-1. Fetch today's scoreboard from ESPN (free, no key, 5-min in-memory TTL) — provides live status/scores/date
+1. Fetch today's scoreboard from ESPN (free, no key, 5-min in-memory TTL) — passes `?dates=YYYYMMDD` to pin to today's slate (prevents ESPN returning yesterday's games when today's haven't started)
 2. For each game, fetch last 3 completed regular-season games per team via ESPN team schedule (1h TTL)
-3. Compute `my_line` (mean of 6 totals), `discrepancy`, `recommendation`, `record` in the backend
+3. Compute `my_line` (mean of 6 totals), `discrepancy`, `recommendation` (`O`/`U`/`P` — push when lines match exactly), `record` in the backend
 4. Fetch DraftKings odds from The Odds API (file-cached daily in `cache/YYYY-MM-DD-nba-total-odds.json`)
    - Opening snapshot saved to `*-odds-open.json` on first fetch — never overwritten, used for line movement
    - `?refreshOdds=true` re-fetches live odds and merges with cache (preserves lines for finished games)
