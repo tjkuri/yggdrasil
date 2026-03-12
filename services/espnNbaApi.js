@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cache = require('../utils/cache');
+const utils = require('../utils/utils');
 
 const SCOREBOARD_TTL_MS = 5 * 60 * 1000;   // 5 min (live scores change)
 const SCHEDULE_TTL_MS   = 60 * 60 * 1000;  // 1 hour (past game totals don't change)
@@ -25,8 +26,7 @@ function getNbaSeason() {
  * @returns {Array<object>} Normalized array of game objects
  */
 async function fetchTodayScoreboard() {
-  // Pass today's local date to ESPN so it never returns yesterday's slate
-  const today = new Date().toLocaleDateString('en-CA').replace(/-/g, ''); // YYYYMMDD
+  const today = utils.getSportsDayEST().replace(/-/g, ''); // YYYYMMDD — rolls over at 4 AM ET
   const key = `espn_nba_scoreboard_${today}`;
   const cached = cache.get(key, SCOREBOARD_TTL_MS);
   if (cached) return cached;
@@ -79,7 +79,7 @@ async function fetchLastNTeamGames(teamId, n = 3) {
   const res = await axios.get(url);
   const events = res.data.events || [];
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = utils.getSportsDayEST();
 
   const completed = events
     .filter(e => {

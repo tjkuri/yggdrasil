@@ -47,8 +47,8 @@ async function fetchNbaTodayGames() {
     var requestConfig = {
         params: {
             apiKey: oddsApiKey,
-            commenceTimeFrom: utils.getToday10AMEST(),
-            commenceTimeTo: utils.getToday1130PMEST(),
+            commenceTimeFrom: utils.getSportsDayStartISO(),
+            commenceTimeTo: utils.getSportsDayEndISO(),
             // dateFormat: 'unix'
         },
       }
@@ -76,8 +76,8 @@ async function fetchNbaTodayLines() {
     var requestConfig = {
         params: {
             apiKey: oddsApiKey,
-            commenceTimeFrom: utils.getToday10AMEST(),
-            commenceTimeTo: utils.getToday1130PMEST(),
+            commenceTimeFrom: utils.getSportsDayStartISO(),
+            commenceTimeTo: utils.getSportsDayEndISO(),
             regions: 'us',
             markets: 'totals',
             oddsFormat: 'american',

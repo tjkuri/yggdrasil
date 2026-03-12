@@ -134,7 +134,7 @@ function computeRecommendation(myLine, dkLine, z_score, expected_value) {
 // GET /api/nba/totals
 router.get('/totals', async (req, res) => {
   try {
-    const today = utils.getToday10AMEST().slice(0, 10);
+    const today = utils.getSportsDayEST();
 
     // --- Odds (file-cached daily, manually refreshable) ---
     const oddsFilePath     = `cache/${today}-nba-total-odds.json`;
