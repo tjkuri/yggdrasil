@@ -5,7 +5,10 @@ const fs = require('fs');
 const utils = require('../utils/utils');
 const espnNbaApi = require('../services/espnNbaApi');
 const theOddsApi = require('../services/theOddsApi');
-const { mean } = require('../utils/nflMath');
+const { weightedMean, weightedVariance, normalCDF } = require('../utils/nbaMath');
+const NBA_CFG = require('../config/nba');
+
+// ─── File cache helpers ───────────────────────────────────────────────────────
 
 async function addToCache(data, filePath) {
   await fs.promises.writeFile(filePath, JSON.stringify(data), 'utf-8');
@@ -19,6 +22,8 @@ async function retrieveFromCache(filePath) {
   return null;
 }
 
+// ─── Odds helpers ─────────────────────────────────────────────────────────────
+
 function findOddsGameByHomeTeam(oddsGames, homeTeamName) {
   for (const g of oddsGames) {
     if (g.home_team.split(' ').pop() === homeTeamName.split(' ').pop()) return g;
@@ -26,19 +31,107 @@ function findOddsGameByHomeTeam(oddsGames, homeTeamName) {
   return null;
 }
 
-function computeRecord(lastSix, dkLine, recommendation) {
-  let wins = 0, pushes = 0, losses = 0;
-  for (const total of lastSix) {
-    if (total === dkLine) { pushes++; continue; }
-    const wentOver = total > dkLine;
-    if ((recommendation === 'O' && wentOver) || (recommendation === 'U' && !wentOver)) wins++;
-    else losses++;
-  }
-  return { wins, pushes, losses };
+// ─── Math helpers ─────────────────────────────────────────────────────────────
+
+function toItems(games, field) {
+  return games.map(g => ({ date: g.date, value: g[field] }));
 }
 
+/**
+ * Compute my_line and variance using O/D splits, recency weighting, and home court.
+ * Implements Upgrades 1, 2, 3, 4, 5.
+ */
+function computeMyLine(homeGames, awayGames, today) {
+  const { LAMBDA, HOME_BOOST, MIN_HOME_AWAY_GAMES } = NBA_CFG;
+
+  const homeOffItems = toItems(homeGames, 'pointsScored');
+  const homeDefItems = toItems(homeGames, 'pointsAllowed');
+  const awayOffItems = toItems(awayGames, 'pointsScored');
+  const awayDefItems = toItems(awayGames, 'pointsAllowed');
+
+  const homeOff = weightedMean(homeOffItems, today, LAMBDA);
+  const homeDef = weightedMean(homeDefItems, today, LAMBDA);
+  const awayOff = weightedMean(awayOffItems, today, LAMBDA);
+  const awayDef = weightedMean(awayDefItems, today, LAMBDA);
+
+  if (homeOff == null || homeDef == null || awayOff == null || awayDef == null) {
+    return { myLine: null, projHome: null, projAway: null, sdTotal: null, components: null };
+  }
+
+  // Upgrade 5: home court — use venue split if sufficient games, else flat boost
+  let homeBoost = HOME_BOOST;
+  const homeAtHome = homeGames.filter(g => g.isHome);
+  const homeAway   = homeGames.filter(g => !g.isHome);
+  if (homeAtHome.length >= MIN_HOME_AWAY_GAMES && homeAway.length >= MIN_HOME_AWAY_GAMES) {
+    const atHomeMean = weightedMean(toItems(homeAtHome, 'pointsScored'), today, LAMBDA);
+    const awayMean   = weightedMean(toItems(homeAway,   'pointsScored'), today, LAMBDA);
+    if (atHomeMean != null && awayMean != null) {
+      homeBoost = atHomeMean - awayMean;
+    }
+  }
+
+  // Upgrade 1: O/D split projection
+  const projHome = (homeOff + awayDef) / 2 + homeBoost / 2;
+  const projAway = (awayOff + homeDef) / 2 - homeBoost / 2;
+  const myLine   = projHome + projAway;
+
+  // Upgrade 4: weighted variance per component
+  const varHomeOff = weightedVariance(homeOffItems, today, LAMBDA, homeOff);
+  const varHomeDef = weightedVariance(homeDefItems, today, LAMBDA, homeDef);
+  const varAwayOff = weightedVariance(awayOffItems, today, LAMBDA, awayOff);
+  const varAwayDef = weightedVariance(awayDefItems, today, LAMBDA, awayDef);
+
+  // Propagate: Var((X+Y)/2) = (Var(X)+Var(Y))/4
+  const varTotal = ((varHomeOff ?? 0) + (varAwayDef ?? 0)) / 4
+                 + ((varAwayOff ?? 0) + (varHomeDef ?? 0)) / 4;
+  const sdTotal = varTotal > 0 ? Math.sqrt(varTotal) : null;
+
+  return {
+    myLine,
+    projHome,
+    projAway,
+    sdTotal,
+    components: { homeOff, homeDef, awayOff, awayDef, homeBoost },
+  };
+}
+
+/**
+ * Compute z-score, confidence tier, and vig-adjusted EV.
+ * Implements Upgrades 4, 6.
+ */
+function computeConfidenceAndEV(discrepancy, sdTotal) {
+  const { Z_HIGH, Z_MEDIUM, VIG_WIN, VIG_RISK } = NBA_CFG;
+  if (sdTotal == null || sdTotal === 0 || discrepancy == null) {
+    return { z_score: null, confidence: null, expected_value: null };
+  }
+  const z    = discrepancy / sdTotal;
+  const absZ = Math.abs(z);
+  const confidence = absZ >= Z_HIGH ? 'HIGH' : absZ >= Z_MEDIUM ? 'MEDIUM' : 'LOW';
+  const impliedWinProb = normalCDF(absZ);
+  const ev = impliedWinProb * VIG_WIN - (1 - impliedWinProb) * VIG_RISK;
+  return {
+    z_score:        parseFloat(z.toFixed(3)),
+    confidence,
+    expected_value: parseFloat(ev.toFixed(4)),
+  };
+}
+
+/**
+ * Determine recommendation. Implements Upgrade 6 (minimum edge threshold).
+ */
+function computeRecommendation(myLine, dkLine, z_score, expected_value) {
+  const { MIN_Z_THRESHOLD } = NBA_CFG;
+  if (myLine == null || dkLine == null) return null;
+  if (z_score == null || Math.abs(z_score) < MIN_Z_THRESHOLD || expected_value <= 0) return 'NO_BET';
+  if (myLine > dkLine) return 'O';
+  if (myLine < dkLine) return 'U';
+  return 'P';
+}
+
+
+// ─── Route ────────────────────────────────────────────────────────────────────
+
 // GET /api/nba/totals
-// Returns today's NBA games with my line, DK line, recommendation, record
 router.get('/totals', async (req, res) => {
   try {
     const today = utils.getToday10AMEST().slice(0, 10);
@@ -51,8 +144,6 @@ router.get('/totals', async (req, res) => {
     let gamesVegasLines = await retrieveFromCache(oddsFilePath);
     if (!gamesVegasLines || refreshOdds) {
       const freshOdds = await theOddsApi.fetchNbaTodayLines();
-      // On refresh, merge: keep cached entries for games no longer in fresh response
-      // (finished games disappear from The Odds API but we still want their lines)
       if (refreshOdds && gamesVegasLines) {
         const freshIds = new Set(freshOdds.map(g => g.id));
         gamesVegasLines = [...freshOdds, ...gamesVegasLines.filter(g => !freshIds.has(g.id))];
@@ -60,38 +151,42 @@ router.get('/totals', async (req, res) => {
         gamesVegasLines = freshOdds;
       }
       addToCache(gamesVegasLines, oddsFilePath);
-      // Opening snapshot — written once per day, never overwritten
       if (!fs.existsSync(oddsOpenFilePath)) {
         addToCache(gamesVegasLines, oddsOpenFilePath);
       }
     }
     const oddsOpen = await retrieveFromCache(oddsOpenFilePath);
 
-    // --- Live scoreboard (5-min in-memory TTL via espnNbaApi) ---
+    // --- Live scoreboard (5-min in-memory TTL) ---
     const scoreboard = await espnNbaApi.fetchTodayScoreboard();
     const scoreboardById = Object.fromEntries(scoreboard.map(g => [g.id, g]));
 
-    // --- My lines (file-cached daily — only last_six, not live fields) ---
-    const myLineFilePath = `cache/${today}-nba-my-lines.json`;
+    // --- My lines (file-cached daily v2 — stores raw game splits, not totals) ---
+    const myLineFilePath = `cache/${today}-nba-my-lines-v2.json`;
     let myLineData = await retrieveFromCache(myLineFilePath);
     if (!myLineData) {
       myLineData = [];
       for (const game of scoreboard) {
         const [homeGames, awayGames] = await Promise.all([
-          espnNbaApi.fetchLastNTeamGames(game.home_team.id, 3),
-          espnNbaApi.fetchLastNTeamGames(game.away_team.id, 3),
+          espnNbaApi.fetchLastNTeamGames(game.home_team.id, NBA_CFG.SAMPLE_SIZE),
+          espnNbaApi.fetchLastNTeamGames(game.away_team.id, NBA_CFG.SAMPLE_SIZE),
         ]);
-        const lastSix = [...homeGames, ...awayGames].map(g => g.total).filter(t => t != null);
-        myLineData.push({ id: game.id, home_team: game.home_team, away_team: game.away_team, last_six: lastSix });
+        myLineData.push({
+          id:        game.id,
+          home_team: game.home_team,
+          away_team: game.away_team,
+          home_games: homeGames,
+          away_games: awayGames,
+        });
       }
       addToCache(myLineData, myLineFilePath);
     }
 
-    // --- Merge odds + pre-compute stats ---
+    // --- Merge and compute ---
     const result = myLineData.map(game => {
-      // Always use live scoreboard for status/scores
-      const live = scoreboardById[game.id] || {};
+      const live     = scoreboardById[game.id] || {};
       const oddsGame = findOddsGameByHomeTeam(gamesVegasLines, game.home_team.name);
+
       let dkLine = null;
       if (oddsGame) {
         const dk = oddsGame.bookmakers.find(b => b.key === 'draftkings');
@@ -110,35 +205,44 @@ router.get('/totals', async (req, res) => {
         ? { from: dkLineOpen, to: dkLine }
         : null;
 
-      const lastSix = game.last_six || [];
-      const myLine = lastSix.length ? parseFloat(mean(lastSix).toFixed(2)) : null;
+      const { myLine, projHome, projAway, sdTotal, components } =
+        computeMyLine(game.home_games, game.away_games, today);
+
       const discrepancy = myLine != null && dkLine != null
         ? parseFloat((myLine - dkLine).toFixed(2))
         : null;
-      const recommendation = myLine != null && dkLine != null
-        ? (myLine > dkLine ? 'O' : myLine < dkLine ? 'U' : 'P')
-        : null;
-      const record = recommendation != null && recommendation !== 'P' && dkLine != null
-        ? computeRecord(lastSix, dkLine, recommendation)
+
+      const { z_score, confidence, expected_value } =
+        computeConfidenceAndEV(discrepancy, sdTotal);
+
+      const recommendation = computeRecommendation(myLine, dkLine, z_score, expected_value);
+
+      const win_probability = z_score != null
+        ? parseFloat((normalCDF(Math.abs(z_score)) * 100).toFixed(1))
         : null;
 
       return {
-        id: game.id,
-        status: live.status,
-        status_detail: live.status_detail,
-        period: live.period,
-        date: live.date,
-        home_team: game.home_team,
-        away_team: game.away_team,
-        home_score: live.home_score,
-        away_score: live.away_score,
-        my_line: myLine,
-        dk_line: dkLine,
-        line_movement: lineMovement,
+        id:              game.id,
+        status:          live.status,
+        status_detail:   live.status_detail,
+        period:          live.period,
+        date:            live.date,
+        home_team:       game.home_team,
+        away_team:       game.away_team,
+        home_score:      live.home_score,
+        away_score:      live.away_score,
+        my_line:         myLine  != null ? parseFloat(myLine.toFixed(2))   : null,
+        proj_home:       projHome != null ? parseFloat(projHome.toFixed(2)) : null,
+        proj_away:       projAway != null ? parseFloat(projAway.toFixed(2)) : null,
+        dk_line:         dkLine,
+        line_movement:   lineMovement,
         discrepancy,
+        z_score,
+        confidence,
+        expected_value,
+        win_probability,
         recommendation,
-        last_six: lastSix,
-        record,
+        components,
       };
     });
 

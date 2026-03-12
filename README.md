@@ -1,16 +1,28 @@
 # Yggdrasil
-Backend to [Mimir](https://github.com/tjkuri/mimir). 
+Backend to [Mimir](https://github.com/tjkuri/mimir).
 
-Currently in development but the goal is to have the mimir repo hold all the frontend react code while this repos code will act as the backend, i.e., handle communication with any 3rd party APIs, stat aggregation, and analysis.
+Node.js/Express API on port 3001. Pulls from third-party sports APIs, does the stat aggregation and analysis, and hands structured data to the frontend so the frontend can stay dumb.
+
+## What it does
+
+**NBA** — Fetches today's scoreboard from ESPN (no key, unofficial API), pulls the last 3 completed regular-season games per team to compute a projected total, then layers in DraftKings odds from The Odds API. Returns enriched games with recommendation, confidence, win probability, EV, and line movement.
+
+**NFL** — QB passing yards analysis. Roster from nflverse CSVs, odds from The Odds API, historical distributions built from nflverse weekly stats. The `/qb/analysis` endpoint combines all three.
 
 ## Further Reading
-Have a [Journal.md](JOURNAL.md) file where I try to keep track of some lessons learned and things I want to add in the future (obviously a 'jira'-like system would be more professional for tracking that sort of thing but right now its just me)
+Have a [Journal.md](JOURNAL.md) where I try to keep track of lessons learned and design decisions. Obviously a Jira-like system would be more professional but it's just me.
 
-## If you want to run this
+## Running it
+
+```bash
+node server.js   # port 3001 (or $PORT)
+```
 
 ### .env
-Requires the following values in a .env file. NBA game data now comes from the ESPN unofficial API (no key needed). Only The Odds API key is required.
+Only The Odds API key is required. NBA game data comes from the ESPN unofficial API (no key needed).
+
 ```bash
 ODDS_API_KEY=<KEY>
-ODDS_HOST=https://api.the-odds-api.com  # optional, defaults to this
+ODDS_HOST=https://api.the-odds-api.com   # optional, this is the default
+ODDS_REFRESH_MODE=manual                  # prevents auto-expiry of paid odds calls
 ```

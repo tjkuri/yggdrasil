@@ -2,6 +2,30 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-03-11
+
+**What changed**
+- Replaced the naive `mean(lastSix)` model with a proper O/D split projection using exponential recency weighting.
+- New `utils/nbaMath.js`: `weightedMean`, `weightedVariance`, `normalCDF` (Abramowitz & Stegun approximation).
+- New `config/nba.js`: all the tunable knobs in one place (`SAMPLE_SIZE`, `LAMBDA`, `HOME_BOOST`, `Z_HIGH`, `Z_MEDIUM`, etc.).
+- ESPN's `fetchLastNTeamGames` now returns `{ pointsScored, pointsAllowed, isHome }` per game instead of just a flat total. Bumped sample size to 10 games per team.
+- `routes/nba.js` now computes: projected home score, projected away score, SD of the total, z-score, confidence tier (HIGH/MEDIUM/LOW), EV at -110, win probability, and a smarter recommendation that gates on z-score + EV (returns `NO_BET` when the edge is below threshold).
+- My-line cache keyed as `v2` since the stored shape changed (raw game splits instead of totals).
+
+**Decisions**
+- O/D split: `projHome = (homeOff + awayDef) / 2 + homeBoost/2`, same for projAway, then sum. Averaging offense and defense for each side is the standard fantasy/analytics approach.
+- Home court: flat +1.5 fallback, but if there are enough home/away split games (≥4 each) it derives the adjustment from the team's own data instead.
+- Recency weighting: `λ = 0.96` means a game from a week ago gets ~0.75× the weight of today's game. Tunable in config.
+- Confidence thresholds: |z| ≥ 1.5 → HIGH, ≥ 0.8 → MEDIUM, < 0.5 → NO_BET. These are starting points, not gospel.
+- EV calculation is vig-adjusted: `P(win) × 0.9091 - P(loss) × 1.0`. If EV ≤ 0 the model passes even when directionally correct.
+
+**Why**
+- The old model was just averaging 6 totals. It had no sense of how confident the projection was or whether a given edge was worth acting on. You'd get an OVER recommendation on a 0.2-point gap, which is noise. The z-score gates out those marginal cases.
+- Splitting offense and defense separately is more accurate — a team's defensive strength matters differently depending on the opponent's offense. Blending them through the O/D formula is a better prior than just averaging past totals.
+- Putting all the constants in `config/nba.js` means I can tune thresholds without hunting through route logic.
+- Variance propagation through the projection formula lets the SD mean something real — it's not arbitrary, it's derived from how consistent each team's recent offense and defense has been.
+
+
 ## 2026-03-09
 
 **What changed**

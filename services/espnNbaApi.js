@@ -93,9 +93,20 @@ async function fetchLastNTeamGames(teamId, n = 3) {
 
   const games = completed.map(e => {
     const comp = e.competitions[0];
-    const total = comp.competitors.reduce((sum, c) => sum + (scoreInt(c.score) ?? 0), 0);
-    return { date: e.date.slice(0, 10), total };
-  }).filter(g => g.total > 0);
+    const self = comp.competitors.find(c => String(c.team.id) === String(teamId));
+    const opp  = comp.competitors.find(c => String(c.team.id) !== String(teamId));
+    if (!self || !opp) return null;
+    const pointsScored  = scoreInt(self.score);
+    const pointsAllowed = scoreInt(opp.score);
+    if (pointsScored == null || pointsAllowed == null) return null;
+    if (pointsScored + pointsAllowed === 0) return null;
+    return {
+      date:          e.date.slice(0, 10),
+      pointsScored,
+      pointsAllowed,
+      isHome:        self.homeAway === 'home',
+    };
+  }).filter(Boolean);
 
   cache.set(key, games);
   return games.slice(0, n);
