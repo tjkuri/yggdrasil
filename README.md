@@ -5,7 +5,7 @@ Node.js/Express API on port 3001. Pulls from third-party sports APIs, does the s
 
 ## What it does
 
-**NBA** — Fetches today's scoreboard from ESPN (no key, unofficial API), pulls the last 10 completed regular-season games per team and runs an O/D split projection with exponential recency weighting, then layers in DraftKings odds from The Odds API. Returns enriched games with recommendation, confidence, win probability, EV, and line movement.
+**NBA** — Fetches today's scoreboard from ESPN (no key, unofficial API), pulls the last 10 completed regular-season games per team and runs an O/D split projection with exponential recency weighting, then layers in DraftKings odds from The Odds API. OT games are stripped to regulation scores before model input so inflated totals don't skew averages. Returns enriched games with recommendation, confidence, win probability, EV, and line movement.
 
 **NFL** — QB passing yards analysis. Roster from nflverse CSVs, odds from The Odds API, historical distributions built from nflverse weekly stats. The `/qb/analysis` endpoint combines all three.
 

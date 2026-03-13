@@ -24,7 +24,7 @@ routes/
   nba.js              # GET /api/nba/totals — today's games with my line vs DK odds
   nfl.js              # GET /api/nfl/qbs, /qb/line, /qb/passing-yards, /qb/analysis
 services/
-  espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h TTL)
+  espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h/24h TTL); fetchGameSummary strips OT periods
   theOddsApi.js       # Sportsbook odds (NBA totals, NFL passing yards) via The Odds API
   nflverseRoster.js   # NFL roster CSVs from nflverse GitHub releases (12h TTL cache)
   nflverseStats.js    # NFL weekly player stats CSVs from nflverse (12h TTL cache); exports buildScopedDistributions
@@ -70,13 +70,13 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 
 **NBA data flow for `/api/nba/totals`**:
 1. Fetch today's scoreboard from ESPN (free, no key, 5-min in-memory TTL) — passes `?dates=YYYYMMDD` to pin to today's slate (prevents ESPN returning yesterday's games when today's haven't started)
-2. For each game, fetch last 10 completed regular-season games per team via ESPN team schedule (1h TTL) — each game returns `{ date, pointsScored, pointsAllowed, isHome }`
+2. For each game, fetch last 10 completed regular-season games per team via ESPN team schedule (1h TTL) — each game returns `{ date, pointsScored, pointsAllowed, isHome, wentToOT }`. OT games are detected via `shortDetail.includes('OT')`; if detected, `fetchGameSummary(eventId)` is called (summary endpoint, 24h cache) to get per-quarter linescores and sum only the first 4 quarters. Model always trains on regulation-only scores.
 3. Compute projection via O/D split model (`computeMyLine`): recency-weighted offense/defense averages (λ=0.96), home-court adjustment (derived from venue splits if ≥4 each, else flat +1.5). Propagate weighted variance through the formula to get `sdTotal`.
 4. Derive `z_score = discrepancy / sdTotal`, map to `confidence` (HIGH/MEDIUM/LOW), compute vig-adjusted `expected_value` and `win_probability`. Gate `recommendation` on `|z| ≥ 0.5` and `EV > 0`; returns `NO_BET` otherwise.
 5. Fetch DraftKings odds from The Odds API (file-cached daily in `cache/YYYY-MM-DD-nba-total-odds.json`)
    - Opening snapshot saved to `*-odds-open.json` on first fetch — never overwritten, used for line movement
    - `?refreshOdds=true` re-fetches live odds and merges with cache (preserves lines for finished games)
-   - My-lines cached as `cache/YYYY-MM-DD-nba-my-lines-v2.json` (stores raw game splits, not totals)
+   - My-lines cached as `cache/YYYY-MM-DD-nba-my-lines-v3.json` (stores raw game splits with regulation-only scores, not totals)
 6. Return enriched games array with `line_movement: { from, to }` when DK line has shifted
 
 ## Current API Endpoints
