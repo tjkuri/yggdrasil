@@ -136,6 +136,17 @@ router.get('/totals', async (req, res) => {
   try {
     const today = utils.getSportsDayEST();
 
+    // --- Live scoreboard (5-min in-memory TTL) — fetch first so we know game statuses ---
+    const scoreboard = await espnNbaApi.fetchTodayScoreboard();
+    const scoreboardById = Object.fromEntries(scoreboard.map(g => [g.id, g]));
+
+    // Games no longer pre-game: their DK line should be frozen (live lines are meaningless to us)
+    const liveHomeTeams = new Set(
+      scoreboard
+        .filter(g => g.status === 'STATUS_IN_PROGRESS' || g.status === 'STATUS_FINAL')
+        .map(g => g.home_team.name.split(' ').pop())
+    );
+
     // --- Odds (file-cached daily, manually refreshable) ---
     const oddsFilePath     = `cache/${today}-nba-total-odds.json`;
     const oddsOpenFilePath = `cache/${today}-nba-total-odds-open.json`;
@@ -145,8 +156,12 @@ router.get('/totals', async (req, res) => {
     if (!gamesVegasLines || refreshOdds) {
       const freshOdds = await theOddsApi.fetchNbaTodayLines();
       if (refreshOdds && gamesVegasLines) {
-        const freshIds = new Set(freshOdds.map(g => g.id));
-        gamesVegasLines = [...freshOdds, ...gamesVegasLines.filter(g => !freshIds.has(g.id))];
+        // Only update lines for scheduled games — freeze lines for live/final games
+        const freshScheduledOnly = freshOdds.filter(
+          g => !liveHomeTeams.has(g.home_team.split(' ').pop())
+        );
+        const freshIds = new Set(freshScheduledOnly.map(g => g.id));
+        gamesVegasLines = [...freshScheduledOnly, ...gamesVegasLines.filter(g => !freshIds.has(g.id))];
       } else {
         gamesVegasLines = freshOdds;
       }
@@ -156,10 +171,6 @@ router.get('/totals', async (req, res) => {
       }
     }
     const oddsOpen = await retrieveFromCache(oddsOpenFilePath);
-
-    // --- Live scoreboard (5-min in-memory TTL) ---
-    const scoreboard = await espnNbaApi.fetchTodayScoreboard();
-    const scoreboardById = Object.fromEntries(scoreboard.map(g => [g.id, g]));
 
     // --- My lines (file-cached daily v2 — stores raw game splits, not totals) ---
     const myLineFilePath = `cache/${today}-nba-my-lines-v2.json`;
@@ -242,6 +253,7 @@ router.get('/totals', async (req, res) => {
         expected_value,
         win_probability,
         recommendation,
+        sd_total:        sdTotal != null ? parseFloat(sdTotal.toFixed(4)) : null,
         components,
       };
     });
