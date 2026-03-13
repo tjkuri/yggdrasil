@@ -76,7 +76,7 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 5. Fetch DraftKings odds from The Odds API (file-cached daily in `cache/YYYY-MM-DD-nba-total-odds.json`)
    - Opening snapshot saved to `*-odds-open.json` on first fetch — never overwritten, used for line movement
    - `?refreshOdds=true` re-fetches live odds and merges with cache (preserves lines for finished games)
-   - My-lines cached as `cache/YYYY-MM-DD-nba-my-lines-v3.json` (stores raw game splits with regulation-only scores, not totals)
+   - My-lines cached as `cache/YYYY-MM-DD-nba-model-inputs.json` (stores raw game splits with regulation-only scores, not totals)
 6. Return enriched games array with `line_movement: { from, to }` when DK line has shifted
 
 ## Current API Endpoints

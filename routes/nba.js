@@ -172,8 +172,8 @@ router.get('/totals', async (req, res) => {
     }
     const oddsOpen = await retrieveFromCache(oddsOpenFilePath);
 
-    // --- My lines (file-cached daily v2 — stores raw game splits, not totals) ---
-    const myLineFilePath = `cache/${today}-nba-my-lines-v3.json`;
+    // --- My lines (file-cached daily — stores raw game splits, regulation-only scores) ---
+    const myLineFilePath = `cache/${today}-nba-model-inputs.json`;
     let myLineData = await retrieveFromCache(myLineFilePath);
     if (!myLineData) {
       myLineData = [];
