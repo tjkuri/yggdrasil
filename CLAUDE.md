@@ -11,7 +11,11 @@ The sibling frontend project (Mimir) lives at `../mimir` and runs on port 3000.
 ## Commands
 
 ```bash
-node server.js        # Start server (port 3001, or $PORT)
+node server.js                          # Start server (port 3001, or $PORT)
+node scripts/backtest.js                # Grade all predictions vs results
+node scripts/backtest.js --days 3       # Last 3 dates only
+node scripts/backtest.js --team Lakers  # Filter to one team (case-insensitive substring)
+node scripts/backtest.js --json         # Machine-readable output
 ```
 
 No test suite is configured yet.
@@ -26,9 +30,13 @@ routes/
 services/
   espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h/24h TTL); fetchGameSummary strips OT periods
   theOddsApi.js       # Sportsbook odds (NBA totals, NFL passing yards) via The Odds API
+  nbaBacktest.js      # Grades predictions vs results; loadGradedGames(cacheDir, opts) + computeMetrics(games)
   nflverseRoster.js   # NFL roster CSVs from nflverse GitHub releases (12h TTL cache)
   nflverseStats.js    # NFL weekly player stats CSVs from nflverse (12h TTL cache); exports buildScopedDistributions
   nflTeamNames.js     # Static lookup: team abbreviation → full name
+scripts/
+  backtest.js         # CLI entry point — colored tables via chalk + cli-table3
+  backfill.js         # One-off backfill helper
 utils/
   cache.js            # In-memory Map with TTL (get/set/del/clear)
   cache/              # File-based JSON cache for NBA odds/mylines (keyed by date)
@@ -79,11 +87,19 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
    - My-lines cached as `cache/YYYY-MM-DD-nba-model-inputs.json` (stores raw game splits with regulation-only scores, not totals)
 6. Return enriched games array with `line_movement: { from, to }` when DK line has shifted
 
+**NBA backtest flow for `/api/nba/backtest`** (and `scripts/backtest.js`):
+1. `loadGradedGames(cacheDir, opts)` — globs `cache/*-nba-predictions.json`, pairs each with a same-date `*-nba-results.json`; skips dates where results aren't fully final
+2. `gradeGame(pred, result, dateStr)` — V2: grades `'O'`/`'U'` recs against `actual_total` vs `opening_dk_line`; V1: infers direction from `v1_line - opening_dk_line`, grades same way; handles `v1_line: null`
+3. `computeMetrics(games)` — overall W/L/P/ROI at -110, breakdowns by confidence (incl. NO_BET hypothetical), direction, gap-size bucket, calibration buckets, avg absolute miss
+4. CLI renders colored tables (chalk + cli-table3): green/red on win rate vs 52.4% break-even, yellow ⚠ on small samples, ✓/✗ icons per game
+5. REST endpoint returns `{ games, metrics }` JSON
+
 ## Current API Endpoints
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/api/nba/totals` | Today's NBA games with projected total, DK odds, confidence, EV, win probability, recommendation |
+| GET | `/api/nba/backtest` | Graded predictions vs actuals; supports `?days=N&team=X` |
 | GET | `/api/nfl/health` | Health check |
 | GET | `/api/nfl/qbs` | NFL QB roster list (supports `season`, `active`, `startersOnly`, `limit`) |
 | GET | `/api/nfl/qb/line` | Passing yards market odds for one QB (`playerId`, `refresh`) |

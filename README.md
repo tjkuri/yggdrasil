@@ -7,6 +7,15 @@ Node.js/Express API on port 3001. Pulls from third-party sports APIs, does the s
 
 **NBA** — Fetches today's scoreboard from ESPN (no key, unofficial API), pulls the last 10 completed regular-season games per team and runs an O/D split projection with exponential recency weighting, then layers in DraftKings odds from The Odds API. OT games are stripped to regulation scores before model input so inflated totals don't skew averages. Returns enriched games with recommendation, confidence, win probability, EV, and line movement.
 
+**NBA Backtest** — Logs daily prediction snapshots (`cache/YYYY-MM-DD-nba-predictions.json`) and final scores (`cache/YYYY-MM-DD-nba-results.json`). A CLI script grades all historical predictions against actuals, computing W/L/ROI for the V2 model and a naive V1 baseline, with breakdowns by confidence tier, direction, gap size, and calibration buckets.
+
+```bash
+node scripts/backtest.js                # all available dates
+node scripts/backtest.js --days 7       # last 7 days
+node scripts/backtest.js --team Lakers  # filter to one team
+node scripts/backtest.js --json         # machine-readable output
+```
+
 **NFL** — QB passing yards analysis. Roster from nflverse CSVs, odds from The Odds API, historical distributions built from nflverse weekly stats. The `/qb/analysis` endpoint combines all three.
 
 ## Further Reading

@@ -2,6 +2,28 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-03-15
+
+**What changed**
+- Added NBA backtest engine: `services/nbaBacktest.js`, `scripts/backtest.js`, and `GET /api/nba/backtest`.
+- `loadGradedGames` globs `cache/*-nba-predictions.json`, pairs each with the same-date results file, skips any date not fully final, then calls `gradeGame` for each matched prediction/result pair.
+- `gradeGame` handles both V2 (grades `'O'`/`'U'` recs against `actual_total`) and V1 (naive mean baseline, inferred direction from `v1_line - dk_line`). `v1_line: null` treated as no data — excluded from V1 aggregates.
+- `computeMetrics` computes overall W/L/P, ROI at -110, and breakdowns: by confidence tier (incl. NO_BET hypothetical), by direction (O/U), by gap-size bucket (0–2, 2–5, 5+), calibration buckets on |z| ranges, and avg absolute miss for both V2 and V1.
+- CLI uses `chalk` + `cli-table3` for Bloomberg-terminal-style output: green/red on win rate vs 52.4% break-even, yellow ⚠ warnings on small samples (n < 10), ✓/✗ icons per game row.
+- `--days N`, `--team X` (case-insensitive substring match on full team name), `--json` flags.
+
+**Decisions**
+- Grading uses `actual_total` (full game including OT) — DK lines grade on the final score, not regulation.
+- `opening_recommendation` in the predictions file is `'O'`/`'U'`/`'NO_BET'` (not `'OVER'`/`'UNDER'`) — grading logic matches on the short form.
+- NO_BET hypothetical: takes all NO_BET games, infers direction from sign of z_score, grades as if a bet was placed. If the hypothetical win rate is < 52.4%, the filter is doing its job (saving money at -110 odds).
+- ROI formula: `((wins × 90.91) − (losses × 100)) / (total_bets × 100) × 100`. Break-even win rate at -110 is 52.38%.
+- chalk v4 required (not v5+) — the project is CommonJS and chalk v5 is ESM-only.
+
+**Why**
+- Three dates of logged predictions is enough to wire up the grading logic. Numbers will be more meaningful as the sample grows, but the infrastructure is in place.
+- Wanted the CLI to be readable at a glance without being garish — green/red on the metrics that matter (win rate, ROI), dim gray for empty/N/A buckets, yellow only for actionable warnings.
+
+
 ## 2026-03-11
 
 **What changed**

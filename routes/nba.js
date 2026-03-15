@@ -1,12 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const fs = require('fs');
+const path = require('path');
 
 const utils = require('../utils/utils');
 const espnNbaApi = require('../services/espnNbaApi');
 const theOddsApi = require('../services/theOddsApi');
-const { weightedMean, weightedVariance, normalCDF } = require('../utils/nbaMath');
+const { normalCDF, computeMyLine, computeConfidenceAndEV, computeRecommendation } = require('../utils/nbaMath');
 const NBA_CFG = require('../config/nba');
+const nbaLogger = require('../services/nbaLogger');
+const nbaBacktest = require('../services/nbaBacktest');
+
+const CACHE_DIR = path.join(__dirname, '../cache');
 
 // ─── File cache helpers ───────────────────────────────────────────────────────
 
@@ -31,105 +36,8 @@ function findOddsGameByHomeTeam(oddsGames, homeTeamName) {
   return null;
 }
 
-// ─── Math helpers ─────────────────────────────────────────────────────────────
 
-function toItems(games, field) {
-  return games.map(g => ({ date: g.date, value: g[field] }));
-}
-
-/**
- * Compute my_line and variance using O/D splits, recency weighting, and home court.
- * Implements Upgrades 1, 2, 3, 4, 5.
- */
-function computeMyLine(homeGames, awayGames, today) {
-  const { LAMBDA, HOME_BOOST, MIN_HOME_AWAY_GAMES } = NBA_CFG;
-
-  const homeOffItems = toItems(homeGames, 'pointsScored');
-  const homeDefItems = toItems(homeGames, 'pointsAllowed');
-  const awayOffItems = toItems(awayGames, 'pointsScored');
-  const awayDefItems = toItems(awayGames, 'pointsAllowed');
-
-  const homeOff = weightedMean(homeOffItems, today, LAMBDA);
-  const homeDef = weightedMean(homeDefItems, today, LAMBDA);
-  const awayOff = weightedMean(awayOffItems, today, LAMBDA);
-  const awayDef = weightedMean(awayDefItems, today, LAMBDA);
-
-  if (homeOff == null || homeDef == null || awayOff == null || awayDef == null) {
-    return { myLine: null, projHome: null, projAway: null, sdTotal: null, components: null };
-  }
-
-  // Upgrade 5: home court — use venue split if sufficient games, else flat boost
-  let homeBoost = HOME_BOOST;
-  const homeAtHome = homeGames.filter(g => g.isHome);
-  const homeAway   = homeGames.filter(g => !g.isHome);
-  if (homeAtHome.length >= MIN_HOME_AWAY_GAMES && homeAway.length >= MIN_HOME_AWAY_GAMES) {
-    const atHomeMean = weightedMean(toItems(homeAtHome, 'pointsScored'), today, LAMBDA);
-    const awayMean   = weightedMean(toItems(homeAway,   'pointsScored'), today, LAMBDA);
-    if (atHomeMean != null && awayMean != null) {
-      homeBoost = atHomeMean - awayMean;
-    }
-  }
-
-  // Upgrade 1: O/D split projection
-  const projHome = (homeOff + awayDef) / 2 + homeBoost / 2;
-  const projAway = (awayOff + homeDef) / 2 - homeBoost / 2;
-  const myLine   = projHome + projAway;
-
-  // Upgrade 4: weighted variance per component
-  const varHomeOff = weightedVariance(homeOffItems, today, LAMBDA, homeOff);
-  const varHomeDef = weightedVariance(homeDefItems, today, LAMBDA, homeDef);
-  const varAwayOff = weightedVariance(awayOffItems, today, LAMBDA, awayOff);
-  const varAwayDef = weightedVariance(awayDefItems, today, LAMBDA, awayDef);
-
-  // Propagate: Var((X+Y)/2) = (Var(X)+Var(Y))/4
-  const varTotal = ((varHomeOff ?? 0) + (varAwayDef ?? 0)) / 4
-                 + ((varAwayOff ?? 0) + (varHomeDef ?? 0)) / 4;
-  const sdTotal = varTotal > 0 ? Math.sqrt(varTotal) : null;
-
-  return {
-    myLine,
-    projHome,
-    projAway,
-    sdTotal,
-    components: { homeOff, homeDef, awayOff, awayDef, homeBoost },
-  };
-}
-
-/**
- * Compute z-score, confidence tier, and vig-adjusted EV.
- * Implements Upgrades 4, 6.
- */
-function computeConfidenceAndEV(discrepancy, sdTotal) {
-  const { Z_HIGH, Z_MEDIUM, VIG_WIN, VIG_RISK } = NBA_CFG;
-  if (sdTotal == null || sdTotal === 0 || discrepancy == null) {
-    return { z_score: null, confidence: null, expected_value: null };
-  }
-  const z    = discrepancy / sdTotal;
-  const absZ = Math.abs(z);
-  const confidence = absZ >= Z_HIGH ? 'HIGH' : absZ >= Z_MEDIUM ? 'MEDIUM' : 'LOW';
-  const impliedWinProb = normalCDF(absZ);
-  const ev = impliedWinProb * VIG_WIN - (1 - impliedWinProb) * VIG_RISK;
-  return {
-    z_score:        parseFloat(z.toFixed(3)),
-    confidence,
-    expected_value: parseFloat(ev.toFixed(4)),
-  };
-}
-
-/**
- * Determine recommendation. Implements Upgrade 6 (minimum edge threshold).
- */
-function computeRecommendation(myLine, dkLine, z_score, expected_value) {
-  const { MIN_Z_THRESHOLD } = NBA_CFG;
-  if (myLine == null || dkLine == null) return null;
-  if (z_score == null || Math.abs(z_score) < MIN_Z_THRESHOLD || expected_value <= 0) return 'NO_BET';
-  if (myLine > dkLine) return 'O';
-  if (myLine < dkLine) return 'U';
-  return 'P';
-}
-
-
-// ─── Route ────────────────────────────────────────────────────────────────────
+// ─── Routes ───────────────────────────────────────────────────────────────────
 
 // GET /api/nba/totals
 router.get('/totals', async (req, res) => {
@@ -139,6 +47,10 @@ router.get('/totals', async (req, res) => {
     // --- Live scoreboard (5-min in-memory TTL) — fetch first so we know game statuses ---
     const scoreboard = await espnNbaApi.fetchTodayScoreboard();
     const scoreboardById = Object.fromEntries(scoreboard.map(g => [g.id, g]));
+
+    // Auto-persist results as a side effect (fire-and-forget)
+    nbaLogger.writeResultsForDate(today, scoreboard)
+      .catch(err => console.error('[nbaLogger results]', err));
 
     // Games no longer pre-game: their DK line should be frozen (live lines are meaningless to us)
     const liveHomeTeams = new Set(
@@ -193,6 +105,12 @@ router.get('/totals', async (req, res) => {
       addToCache(myLineData, myLineFilePath);
     }
 
+    // Write predictions snapshot once (when both odds-open and model-inputs are ready)
+    if (oddsOpen && fs.existsSync(oddsOpenFilePath)) {
+      nbaLogger.writePredictionsForDate(today, myLineData, oddsOpen)
+        .catch(err => console.error('[nbaLogger predictions]', err));
+    }
+
     // --- Merge and compute ---
     const result = myLineData.map(game => {
       const live     = scoreboardById[game.id] || {};
@@ -217,16 +135,16 @@ router.get('/totals', async (req, res) => {
         : null;
 
       const { myLine, projHome, projAway, sdTotal, components } =
-        computeMyLine(game.home_games, game.away_games, today);
+        computeMyLine(game.home_games, game.away_games, today, NBA_CFG);
 
       const discrepancy = myLine != null && dkLine != null
         ? parseFloat((myLine - dkLine).toFixed(2))
         : null;
 
       const { z_score, confidence, expected_value } =
-        computeConfidenceAndEV(discrepancy, sdTotal);
+        computeConfidenceAndEV(discrepancy, sdTotal, NBA_CFG);
 
-      const recommendation = computeRecommendation(myLine, dkLine, z_score, expected_value);
+      const recommendation = computeRecommendation(myLine, dkLine, z_score, expected_value, NBA_CFG);
 
       const win_probability = z_score != null
         ? parseFloat((normalCDF(Math.abs(z_score)) * 100).toFixed(1))
@@ -261,6 +179,40 @@ router.get('/totals', async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[nba/totals]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/nba/backtest
+router.get('/backtest', async (req, res) => {
+  try {
+    const { days, team } = req.query;
+    const opts = {};
+    if (days) opts.days = parseInt(days, 10);
+    let games = await nbaBacktest.loadGradedGames(CACHE_DIR, opts);
+    if (team) {
+      const t = team.toLowerCase();
+      games = games.filter(g =>
+        g.home_team.toLowerCase().includes(t) ||
+        g.away_team.toLowerCase().includes(t)
+      );
+    }
+    const metrics = nbaBacktest.computeMetrics(games);
+    res.json({ games, metrics });
+  } catch (err) {
+    console.error('[nba/backtest]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/nba/backfill
+router.get('/backfill', async (req, res) => {
+  try {
+    const summary = await nbaLogger.backfillLastNDays(3);
+    console.log('[backfill]', JSON.stringify(summary));
+    res.json(summary);
+  } catch (err) {
+    console.error('[nba/backfill]', err);
     res.status(500).json({ error: err.message });
   }
 });
