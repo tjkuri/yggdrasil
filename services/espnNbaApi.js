@@ -24,16 +24,17 @@ function getNbaSeason() {
 }
 
 /**
- * Fetch today's NBA scoreboard from ESPN (no API key required).
+ * Fetch NBA scoreboard for a specific date from ESPN.
+ * @param {string} dateStr - 'YYYY-MM-DD'
  * @returns {Array<object>} Normalized array of game objects
  */
-async function fetchTodayScoreboard() {
-  const today = utils.getSportsDayEST().replace(/-/g, ''); // YYYYMMDD — rolls over at 4 AM ET
-  const key = `espn_nba_scoreboard_${today}`;
+async function fetchScoreboardForDate(dateStr) {
+  const dateCompact = dateStr.replace(/-/g, ''); // YYYYMMDD
+  const key = `espn_nba_scoreboard_${dateCompact}`;
   const cached = cache.get(key, SCOREBOARD_TTL_MS);
   if (cached) return cached;
 
-  const res = await axios.get(`${SCOREBOARD_URL}?dates=${today}`);
+  const res = await axios.get(`${SCOREBOARD_URL}?dates=${dateCompact}`);
   const events = res.data.events || [];
 
   const games = events.map(event => {
@@ -63,6 +64,14 @@ async function fetchTodayScoreboard() {
 
   cache.set(key, games);
   return games;
+}
+
+/**
+ * Fetch today's NBA scoreboard from ESPN (no API key required).
+ * @returns {Array<object>} Normalized array of game objects
+ */
+async function fetchTodayScoreboard() {
+  return fetchScoreboardForDate(utils.getSportsDayEST());
 }
 
 /**
@@ -98,6 +107,7 @@ async function fetchGameSummary(eventId) {
 
 /**
  * Fetch the last N completed regular-season games for a team by ESPN team ID.
+ * Scores are regulation-only (OT periods stripped).
  * @param {string} teamId - ESPN team ID
  * @param {number} n - Number of recent games to return
  * @returns {Array<{date: string, pointsScored: number, pointsAllowed: number, isHome: boolean, wentToOT: boolean}>}
@@ -163,4 +173,56 @@ async function fetchLastNTeamGames(teamId, n = 3) {
   return games.slice(0, n);
 }
 
-module.exports = { fetchTodayScoreboard, fetchLastNTeamGames, fetchGameSummary };
+/**
+ * Fetch last N completed regular-season games for a team, with FULL scores (OT included).
+ * Used for v1_line baseline calculation in predictions snapshot.
+ * @param {string} teamId - ESPN team ID
+ * @param {number} n - Number of recent games to return
+ * @param {string} slateDate - 'YYYY-MM-DD' cutoff — only games before this date are included
+ * @returns {Array<{date: string, pointsScored: number, pointsAllowed: number, isHome: boolean, wentToOT: boolean}>}
+ */
+async function fetchLastNTeamGamesTotal(teamId, n, slateDate) {
+  const season = getNbaSeason();
+  const key = `espn_team_schedule_raw_${teamId}_${season}_${slateDate}`;
+  const cached = cache.get(key, SCHEDULE_TTL_MS);
+  if (cached) return cached.slice(0, n);
+
+  const url = `${SCHEDULE_BASE}/${teamId}/schedule?season=${season}`;
+  const res = await axios.get(url);
+  const events = res.data.events || [];
+
+  const completed = events
+    .filter(e => {
+      const isRegular = e.seasonType?.type === 2;
+      const comp0 = e.competitions?.[0];
+      const isFinal = comp0?.status?.type?.completed === true;
+      const gameDate = e.date?.slice(0, 10);
+      return isRegular && isFinal && gameDate < slateDate;
+    })
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const games = completed.map(e => {
+    const comp = e.competitions[0];
+    const self = comp.competitors.find(c => String(c.team.id) === String(teamId));
+    const opp  = comp.competitors.find(c => String(c.team.id) !== String(teamId));
+    if (!self || !opp) return null;
+    const pointsScored  = scoreInt(self.score);
+    const pointsAllowed = scoreInt(opp.score);
+    if (pointsScored == null || pointsAllowed == null) return null;
+    if (pointsScored + pointsAllowed === 0) return null;
+
+    const isOT = comp.status?.type?.shortDetail?.includes('OT') ?? false;
+    return {
+      date:          e.date.slice(0, 10),
+      pointsScored,   // full total including OT
+      pointsAllowed,
+      isHome:        self.homeAway === 'home',
+      wentToOT:      isOT,
+    };
+  }).filter(Boolean);
+
+  cache.set(key, games);
+  return games.slice(0, n);
+}
+
+module.exports = { fetchTodayScoreboard, fetchScoreboardForDate, fetchLastNTeamGames, fetchLastNTeamGamesTotal, fetchGameSummary };
