@@ -55,7 +55,7 @@ router.get('/totals', async (req, res) => {
     // Games no longer pre-game: their DK line should be frozen (live lines are meaningless to us)
     const liveHomeTeams = new Set(
       scoreboard
-        .filter(g => g.status === 'STATUS_IN_PROGRESS' || g.status === 'STATUS_FINAL')
+        .filter(g => g.status === 'STATUS_IN_PROGRESS' || g.status === 'STATUS_HALFTIME' || g.status === 'STATUS_FINAL')
         .map(g => g.home_team.name.split(' ').pop())
     );
 

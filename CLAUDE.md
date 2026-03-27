@@ -28,8 +28,9 @@ routes/
   nba.js              # GET /api/nba/totals — today's games with my line vs DK odds
   nfl.js              # GET /api/nfl/qbs, /qb/line, /qb/passing-yards, /qb/analysis
 services/
-  espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h/24h TTL); fetchGameSummary strips OT periods
+  espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h/24h TTL); fetchScoreboardForDate(dateStr) + fetchTodayScoreboard() + fetchLastNTeamGames (regulation-only) + fetchLastNTeamGamesTotal (full incl. OT) + fetchGameSummary
   theOddsApi.js       # Sportsbook odds (NBA totals, NFL passing yards) via The Odds API
+  nbaLogger.js        # Write/update file-based NBA records: writeResultsForDate, writePredictionsForDate (write-once snapshot), backfillLastNDays
   nbaBacktest.js      # Grades predictions vs results; loadGradedGames(cacheDir, opts) + computeMetrics(games)
   nflverseRoster.js   # NFL roster CSVs from nflverse GitHub releases (12h TTL cache)
   nflverseStats.js    # NFL weekly player stats CSVs from nflverse (12h TTL cache); exports buildScopedDistributions
@@ -40,7 +41,7 @@ scripts/
 utils/
   cache.js            # In-memory Map with TTL (get/set/del/clear)
   cache/              # File-based JSON cache for NBA odds/mylines (keyed by date)
-  utils.js            # EST timezone helpers (getToday10AMEST, getYesterdayEST, etc.)
+  utils.js            # Sports day helpers (getSportsDayEST — rolls over at 4AM ET, getSportsDayStartISO, getSportsDayEndISO)
   nbaMath.js          # NBA math helpers: weightedMean, weightedVariance, normalCDF
   nflMath.js          # NFL stats helpers: mean, median, quantile, summarize, computeMarketDispersion, buildHistogram
   nameMatch.js        # Player name normalization and fuzzy-matching (isSamePlayer) — single source of truth
@@ -77,15 +78,16 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 5. Return player + event + odds + distributions + timestamp
 
 **NBA data flow for `/api/nba/totals`**:
-1. Fetch today's scoreboard from ESPN (free, no key, 5-min in-memory TTL) — passes `?dates=YYYYMMDD` to pin to today's slate (prevents ESPN returning yesterday's games when today's haven't started)
-2. For each game, fetch last 10 completed regular-season games per team via ESPN team schedule (1h TTL) — each game returns `{ date, pointsScored, pointsAllowed, isHome, wentToOT }`. OT games are detected via `shortDetail.includes('OT')`; if detected, `fetchGameSummary(eventId)` is called (summary endpoint, 24h cache) to get per-quarter linescores and sum only the first 4 quarters. Model always trains on regulation-only scores.
+1. Fetch today's scoreboard via `fetchTodayScoreboard()` (→ `fetchScoreboardForDate(getSportsDayEST())`), which passes `?dates=YYYYMMDD` to pin to today's slate. Auto-persist results as fire-and-forget via `nbaLogger.writeResultsForDate` (updates `cache/YYYY-MM-DD-nba-results.json`; locks records once STATUS_FINAL).
+2. For each game, fetch last 10 completed regular-season games per team via `fetchLastNTeamGames` (1h TTL). OT games are detected via `shortDetail.includes('OT')`; if detected, `fetchGameSummary(eventId)` (24h cache) sums only the first 4 quarters. Model always trains on regulation-only scores.
 3. Compute projection via O/D split model (`computeMyLine`): recency-weighted offense/defense averages (λ=0.96), home-court adjustment (derived from venue splits if ≥4 each, else flat +1.5). Propagate weighted variance through the formula to get `sdTotal`.
 4. Derive `z_score = discrepancy / sdTotal`, map to `confidence` (HIGH/MEDIUM/LOW), compute vig-adjusted `expected_value` and `win_probability`. Gate `recommendation` on `|z| ≥ 0.5` and `EV > 0`; returns `NO_BET` otherwise.
 5. Fetch DraftKings odds from The Odds API (file-cached daily in `cache/YYYY-MM-DD-nba-total-odds.json`)
    - Opening snapshot saved to `*-odds-open.json` on first fetch — never overwritten, used for line movement
    - `?refreshOdds=true` re-fetches live odds and merges with cache (preserves lines for finished games)
    - My-lines cached as `cache/YYYY-MM-DD-nba-model-inputs.json` (stores raw game splits with regulation-only scores, not totals)
-6. Return enriched games array with `line_movement: { from, to }` when DK line has shifted
+   - Once both odds-open and model-inputs exist, `nbaLogger.writePredictionsForDate` writes a write-once predictions snapshot (`cache/YYYY-MM-DD-nba-predictions.json`, model_version v3) with opening line, z_score, confidence, recommendation, EV, and a v1_line baseline (mean of last 3 full game totals via `fetchLastNTeamGamesTotal`)
+6. Return enriched games array with `line_movement: { from, to }` when DK line has shifted; also includes `proj_home`, `proj_away`, `sd_total`, `components`
 
 **NBA backtest flow for `/api/nba/backtest`** (and `scripts/backtest.js`):
 1. `loadGradedGames(cacheDir, opts)` — globs `cache/*-nba-predictions.json`, pairs each with a same-date `*-nba-results.json`; skips dates where results aren't fully final
@@ -100,6 +102,7 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 |--------|------|---------|
 | GET | `/api/nba/totals` | Today's NBA games with projected total, DK odds, confidence, EV, win probability, recommendation |
 | GET | `/api/nba/backtest` | Graded predictions vs actuals; supports `?days=N&team=X` |
+| GET | `/api/nba/backfill` | Backfill results + predictions for last 3 sports days (idempotent) |
 | GET | `/api/nfl/health` | Health check |
 | GET | `/api/nfl/qbs` | NFL QB roster list (supports `season`, `active`, `startersOnly`, `limit`) |
 | GET | `/api/nfl/qb/line` | Passing yards market odds for one QB (`playerId`, `refresh`) |

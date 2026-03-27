@@ -43,7 +43,7 @@ async function fetchScoreboardForDate(dateStr) {
     const away = comp.competitors.find(c => c.homeAway === 'away');
     return {
       id: event.id,
-      status: event.status.type.name,          // STATUS_FINAL | STATUS_IN_PROGRESS | STATUS_SCHEDULED
+      status: event.status.type.name,          // STATUS_SCHEDULED | STATUS_IN_PROGRESS | STATUS_HALFTIME | STATUS_FINAL
       status_detail: event.status.type.shortDetail,
       period: event.status.period,
       home_team: {
