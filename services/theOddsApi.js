@@ -8,7 +8,7 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const ODDS_HOST = process.env.ODDS_HOST || "https://api.the-odds-api.com";
 
 module.exports = {
-    fetchNbaTodayGames, fetchNbaTodayLines, listNflEvents, getEventOdds
+    fetchNbaTodayGames, fetchNbaTodayLines, listNflEvents, getEventOdds, fetchMlbOdds
 };
 
 /**
@@ -42,6 +42,27 @@ async function getEventOdds(eventId, { market = "player_pass_yds", regions = "us
  * @returns {Array<object>} List of jsons each representing an NBA game scheduled for today
  * @throws {Error} - if the try statement throws an error, it is logged and raised again for callers to handle
  */
+/**
+ * Fetch MLB odds (h2h, totals, spreads) from DraftKings.
+ * Returns all upcoming games — caller filters to future-only.
+ * Costs 3 credits (1 per market).
+ */
+async function fetchMlbOdds() {
+  if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY");
+  const res = await axios.get(`${ODDS_HOST}/v4/sports/baseball_mlb/odds`, {
+    params: {
+      apiKey: ODDS_API_KEY,
+      regions: 'us',
+      markets: 'h2h,totals,spreads',
+      oddsFormat: 'american',
+      bookmakers: 'draftkings',
+    }
+  });
+  console.log('[mlb] Remaining requests', res.headers['x-requests-remaining']);
+  return { data: res.data, headers: res.headers };
+}
+
+
 async function fetchNbaTodayGames() {
     // config with request params
     var requestConfig = {

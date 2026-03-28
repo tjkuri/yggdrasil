@@ -1,6 +1,7 @@
 const express = require('express');
 const nbaRoutes = require('./routes/nba'); //modules for handling request to /api/nba endpoint
 const nflRoutes = require("./routes/nfl"); //TODO
+const mlbRoutes = require('./routes/mlb');
 
 
 require('dotenv').config(); //allows us to import variables from .env
@@ -25,6 +26,7 @@ app.use(function (req, res, next) {
 app.use('/api/nba', nbaRoutes);
 // TODO
 app.use("/api/nfl", nflRoutes);
+app.use("/api/mlb", mlbRoutes);
 
 
 // Example Hello World route
