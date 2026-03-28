@@ -9,9 +9,6 @@ const theOddsApi = require('../services/theOddsApi');
 const { normalCDF, computeMyLine, computeConfidenceAndEV, computeRecommendation } = require('../utils/nbaMath');
 const NBA_CFG = require('../config/nba');
 const nbaLogger = require('../services/nbaLogger');
-const nbaBacktest = require('../services/nbaBacktest');
-
-const CACHE_DIR = path.join(__dirname, '../cache');
 
 // ─── File cache helpers ───────────────────────────────────────────────────────
 
@@ -179,28 +176,6 @@ router.get('/totals', async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[nba/totals]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/nba/backtest
-router.get('/backtest', async (req, res) => {
-  try {
-    const { days, team } = req.query;
-    const opts = {};
-    if (days) opts.days = parseInt(days, 10);
-    let games = await nbaBacktest.loadGradedGames(CACHE_DIR, opts);
-    if (team) {
-      const t = team.toLowerCase();
-      games = games.filter(g =>
-        g.home_team.toLowerCase().includes(t) ||
-        g.away_team.toLowerCase().includes(t)
-      );
-    }
-    const metrics = nbaBacktest.computeMetrics(games);
-    res.json({ games, metrics });
-  } catch (err) {
-    console.error('[nba/backtest]', err);
     res.status(500).json({ error: err.message });
   }
 });
