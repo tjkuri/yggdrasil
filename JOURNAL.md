@@ -46,6 +46,26 @@ The front end repo mimir has its own version of this, trying to keep notes in th
 - The lesson generalizes past this one feature: this model (season average + opponent multiplier) is structurally different from the NBA model (recent matchup-specific O/D inputs, closer in kind to what a book actually uses) — comparisons to a sharp market will read as bigger "edges" than they are until this model has real game-script/injury/weather inputs. Better to say that in the UI than to let a HIGH badge speak for itself.
 
 
+### Same day, cont'd — prediction logging: the feedback loop the verdict never had
+
+**What changed**
+- `services/nflSchedule.js` — resolves `{season, week}` for an upcoming game from nflverse's `schedules/games.csv` release (unlike the weekly stats CSVs, this one lists future games too), matching by `(homeAbbr, awayAbbr)` plus a ±3-day window around the event's `commence_time` — not a caller-supplied season, and not team-pair alone.
+- `services/nflLogger.js` — write-once prediction snapshot per `(season, week, player_id)`, using an atomic exclusive write (`{ flag: "wx" }`) so a race between two near-simultaneous calls can't let one silently overwrite the other.
+- `routes/nfl.js` — `/qb/analysis` logs a snapshot after computing the verdict, fire-and-forget (a schedule-lookup or logging failure can never surface as a 500 or added latency on the real response).
+- Huginn (sibling repo) gained a new `nfl/` engine that reads these snapshots later and grades them against nflverse's actual results — hit rate, calibration by confidence tier, a NO_BET-hypothetical check, mean absolute error. No dollar EV/ROI there either, same reasoning as the verdict itself.
+
+**Decisions, and two real bugs caught by testing before they shipped**
+- Built via subagent-driven-development (fresh implementer + reviewer per task, a final whole-branch review at the end) rather than by hand — worth noting because the final review is what caught both of these; neither would have been visible from any single task's diff:
+  - **A QB with no posted prop line yet was getting logged anyway**, with `line: null`. That's the *normal* state for any QB more than a few days out from kickoff — and it's worse than useless: it permanently burns the write-once key, so when a real line posts later that week the actual useful snapshot is silently dropped, and it crashes Huginn's grader outright (`actual_yards > None`) once that week is graded. Fixed by adding `line == null` to the logger's guard.
+  - **`season` was derived from `new Date().getFullYear()`**, which is wrong for Weeks 17-18 (played in January, when the calendar year has already rolled over) — the schedule lookup would search a dataset for a season that doesn't exist yet and silently return nothing. Fixed by having `getWeekForMatchup` resolve `season` *and* `week` together from the matched schedule row (via the date-window match), instead of trusting a guessed season from the caller.
+- Chose date-window matching over the simpler team-pair-only approach from the original plan because it fixes both of the above at once, plus a related edge case: two teams can meet twice in a season (division rivals), and matching on team pair alone with no date check risked a preseason meeting between the same two teams colliding with the regular-season lookup.
+- Same trigger/scope decisions as the original spec: on-demand only (a snapshot is logged whenever `/qb/analysis` is actually called, no scheduler), write-once by `(season, week, player_id)` so a later re-check doesn't retroactively "improve" what's graded.
+
+**Why**
+- The QB page's verdict math (Wilson/de-vig, dropped-EV) was tested against exactly one real game and found wanting — see the entry above. Without a real feedback loop, that's the only kind of check this model will ever get. This closes that gap the same way `nbaLogger` + Huginn's `nba/` engine already does for the NBA model.
+- The two caught bugs are a good argument for the final whole-branch review step specifically: per-task review checks "does this task's diff do what its brief says," which both bugs technically passed — the null-line guard was written exactly as specced, and the calendar-year season derivation was inherited from existing `resolvePlayer` code, not new. Only reviewing the whole feature against realistic operating conditions (a QB before props post; the last two weeks of a season) surfaced either one.
+
+
 ## 2026-03-15
 
 **What changed**
