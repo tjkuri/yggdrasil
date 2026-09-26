@@ -373,16 +373,19 @@ router.get("/qb/analysis", async (req, res) => {
     if (opponentAbbr && event) {
       const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
       const awayAbbr = TEAM_NAME_TO_ABBR[event.away_team];
-      nflSchedule.getWeekForMatchup({ season: current, homeAbbr, awayAbbr })
-        .then(week => {
-          if (week == null) return;
+      nflSchedule.getWeekForMatchup({ homeAbbr, awayAbbr, commenceTime: event.commence_time })
+        .then(result => {
+          if (!result) {
+            console.warn("[nflLogger] skipped: no schedule match for", { homeAbbr, awayAbbr, commenceTime: event.commence_time });
+            return;
+          }
           return nflLogger.logPredictionIfNew({
-            season: current, week, player, opponentAbbr,
+            season: result.season, week: result.week, player, opponentAbbr,
             line: lineForAnalysis, scopeUsed: verdictScopeName, verdict,
             adjustedMean: scopes[verdictScopeName]?.mean ?? null,
           });
         })
-        .catch(err => console.error("[nflLogger] failed:", err.message));
+        .catch(err => console.error("[nflLogger] failed:", err?.message || err));
     }
 
     return res.json({

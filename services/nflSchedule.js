@@ -27,23 +27,30 @@ async function fetchSchedule() {
   return rows;
 }
 
+const DATE_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // +/- 3 days around commence_time — comfortably covers any Thu-Mon slate + timezone slop without needing precise TZ math
+
 /**
- * Resolve the NFL week number for a matchup by (season, home team abbr, away team abbr).
- * An ordered (home, away) pair occurs at most once per regular season, even for division
- * rivals who play twice — the other meeting has the abbreviations swapped — so no date
- * matching is needed to disambiguate.
- * @returns {Promise<number|null>}
+ * Resolve {season, week} for an upcoming game by (home/away abbr) + a date window around
+ * commence_time, rather than trusting a caller-supplied season (breaks in Jan/Feb, since
+ * `new Date().getFullYear()` reports next year's calendar year for Weeks 17-18, played in
+ * January) or matching on team pair alone (can collide with an unrelated preseason meeting
+ * between the same two teams, since preseason games aren't filtered out before this call).
+ * @returns {Promise<{season: number, week: number} | null>}
  */
-async function getWeekForMatchup({ season, homeAbbr, awayAbbr }) {
-  if (!season || !homeAbbr || !awayAbbr) return null;
+async function getWeekForMatchup({ homeAbbr, awayAbbr, commenceTime }) {
+  if (!homeAbbr || !awayAbbr || !commenceTime) return null;
   const rows = await fetchSchedule();
+  const target = new Date(commenceTime).getTime();
+  if (Number.isNaN(target)) return null;
+
   const match = rows.find(r =>
-    String(r.season) === String(season) &&
     r.game_type === "REG" &&
     r.home_team === homeAbbr &&
-    r.away_team === awayAbbr
+    r.away_team === awayAbbr &&
+    !Number.isNaN(Date.parse(r.gameday)) &&
+    Math.abs(Date.parse(r.gameday) - target) <= DATE_WINDOW_MS
   );
-  return match ? Number(match.week) : null;
+  return match ? { season: Number(match.season), week: Number(match.week) } : null;
 }
 
 module.exports = { getWeekForMatchup };
