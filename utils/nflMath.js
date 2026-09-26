@@ -123,4 +123,105 @@ function computeMarketDispersion(books) {
   };
 }
 
-module.exports = { mean, median, quantile, stdevSample, percentileOfValue, buildHistogram, summarize, computeMarketDispersion };
+/** American odds → implied probability (still includes the book's vig). */
+function americanToImpliedProb(price) {
+  if (typeof price !== "number" || price === 0) return null;
+  return price > 0 ? 100 / (price + 100) : Math.abs(price) / (Math.abs(price) + 100);
+}
+
+/**
+ * De-vig a two-sided market via the proportional method (the standard approach —
+ * divide each side's implied probability by the pair's overround so they sum to 1).
+ * Averages across every book that quotes both sides, so one book's own vig quirks
+ * don't dominate. Returns fair P(over); fair P(under) is just 1 minus this.
+ */
+function devigFairProbOver(books) {
+  const fairs = [];
+  for (const b of books || []) {
+    const pOver = americanToImpliedProb(b.price_over);
+    const pUnder = americanToImpliedProb(b.price_under);
+    if (pOver != null && pUnder != null) {
+      const overround = pOver + pUnder;
+      if (overround > 0) fairs.push(pOver / overround);
+    }
+  }
+  return fairs.length ? mean(fairs) : null;
+}
+
+/**
+ * Wilson score interval for a sample proportion — unlike a naive normal approximation,
+ * it stays inside [0,1] and widens correctly for small n. z=1.645 → ~95% one-sided
+ * (we only ever read the near bound, so a one-sided interpretation is what we want).
+ */
+function wilsonInterval(p, n, z) {
+  if (p == null || !n) return { lower: null, upper: null };
+  const denom = 1 + (z * z) / n;
+  const center = (p + (z * z) / (2 * n)) / denom;
+  const margin = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / denom;
+  return { lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+/**
+ * Synthesize one lean (OVER/UNDER/NO_BET) from a single scope, the market line, and the raw
+ * book quotes. No dollar EV here — deliberately dropped. This model is a season average
+ * adjusted only for opponent pass-D + funnel; it has no game-script, weather, or injury signal,
+ * the things that actually move a sharp book's number week to week. Presenting a dollar EV
+ * implies a level of confidence the model can't back up in a market this liquid. What's left
+ * is still two real improvements over a naive z-score-vs-line comparison:
+ *  - "Edge" is model probability minus the market's DE-VIGGED fair probability (proportional
+ *    method), not the vig-included price — comparing to a vigged price overstates how much the
+ *    market actually disagrees with us.
+ *  - Confidence comes from a Wilson score interval on the model's own empirical probability, not
+ *    z-score magnitude alone — z can look "confident" off a 2-game sample precisely because a
+ *    small sample produces artificially tight variance. Wilson widens correctly with small n.
+ * @param {object} scope - one of distributions.scopes.{career,last_season,current_season}
+ * @param {number|null} line
+ * @param {Array<{price_over:number|null, price_under:number|null}>} books
+ * @param {object} cfg   - config/nfl.js
+ */
+function computeQbVerdict(scope, line, books, cfg) {
+  const { WILSON_Z, CONFIDENCE_MARGIN } = cfg;
+  const empty = { recommendation: null, confidence: null, win_probability: null, market_fair_probability: null, edge: null, z_score: null };
+  if (!scope || !scope.n || line == null || scope.p_over == null) return empty;
+
+  const fairOver = devigFairProbOver(books);
+  const fairUnder = fairOver != null ? 1 - fairOver : null;
+  const edgeOver = fairOver != null ? scope.p_over - fairOver : null;
+  const edgeUnder = fairUnder != null ? scope.p_under - fairUnder : null;
+
+  // Pick whichever side we have the larger edge on. With no paired book quotes to de-vig
+  // (rare — extractPlayerBooks prefers paired over/under), fall back to the raw distributional gap.
+  let side;
+  if (edgeOver != null && edgeUnder != null) side = edgeOver >= edgeUnder ? "OVER" : "UNDER";
+  else if (scope.z_score != null) side = scope.z_score < 0 ? "OVER" : "UNDER";
+  else return { ...empty, z_score: scope.z_score };
+
+  const modelProb = side === "OVER" ? scope.p_over : scope.p_under;
+  const fairProb = side === "OVER" ? fairOver : fairUnder;
+  const edge = fairProb != null ? modelProb - fairProb : null;
+
+  let confidence = "LOW";
+  if (fairProb != null) {
+    const { lower } = wilsonInterval(modelProb, scope.n, WILSON_Z);
+    if (lower != null) {
+      if (lower > fairProb + CONFIDENCE_MARGIN) confidence = "HIGH";
+      else if (lower > fairProb) confidence = "MEDIUM";
+    }
+  }
+
+  const recommendation = (edge == null || edge <= 0 || confidence === "LOW") ? "NO_BET" : side;
+
+  return {
+    recommendation,
+    confidence,
+    win_probability: Number((modelProb * 100).toFixed(1)),
+    market_fair_probability: fairProb != null ? Number((fairProb * 100).toFixed(1)) : null,
+    edge: edge != null ? Number((edge * 100).toFixed(1)) : null,
+    z_score: scope.z_score,
+  };
+}
+
+module.exports = {
+  mean, median, quantile, stdevSample, percentileOfValue, buildHistogram, summarize, computeMarketDispersion,
+  americanToImpliedProb, devigFairProbOver, wilsonInterval, computeQbVerdict,
+};

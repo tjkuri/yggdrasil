@@ -2,6 +2,50 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-09-26
+
+**What changed**
+- Added opponent-adjustment to NFL QB passing yards distributions: `config/nfl.js` + `services/nflDefense.js` compute per-team `pass_ypa_factor` and `rush_stop_factor` from nflverse weekly stats, blended current+prior season (recency-weighted) and shrunk toward league average by sample size.
+- `nflverseStats.buildScopedDistributions` takes an optional `matchupFactor` (default 1.0, so `/qb/passing-yards` is unaffected) and rescales every historical game before computing the distribution; each scope now also returns `raw_mean` for a "vs raw" comparison.
+- `routes/nfl.js` resolves the opponent abbr from the upcoming event and wires the matchup factor into `/qb/analysis`; response gains a top-level `matchup` object.
+
+**Decisions**
+- Used yards-**per-attempt** allowed, not total yards allowed, for the pass factor. Checked first: raw total-yards-allowed ranking put PIT as the league's *worst* pass defense in 2025 — it isn't, it just faces 36 attempts/game (most in the league) to BUF's 25. YPA isolates the actual defensive trait; total yards mostly measures how often the team gets thrown at.
+- Added a second, weaker signal from run-defense strength ("pass funnel" — a stout run D pushes opponents to throw more, independent of pass efficiency; this is the industry term PFF/NBC use in their weekly funnel reports). Verified against 2025 data before committing: corr(rush_stop_factor, QB attempts faced) = 0.302 — real, but clearly weaker than the efficiency signal, so it gets a dampening exponent (`VOLUME_DAMPEN_EXP = 0.35`) and heavier shrinkage (`SHRINK_K_RUSH = 12` vs `SHRINK_K_PASS = 8`).
+- Shrinkage denominator must be **distinct games**, not rows — caught this in testing: a passer row is ~1 per team per game, but a rush-allowed row is one per ball-carrier (RB/WR/QB scrambles), so counting rows gave the rush aggregate an apparent n of ~90 against a real ~19 games, which silently defeated the "shrink harder" decision (barely any shrinkage was actually happening). Fixed by deduping on `game_id` before incrementing the weight used for shrinkage, while still summing every row's yards/carries into the point estimate.
+- Rescale-and-keep-n (not filter-to-similar-opponents): every historical game gets `× matchup_factor` rather than throwing out games against dissimilar defenses. Preserves sample size, which matters a lot in week 3 of a season.
+- No home/away split: checked 2025 data first — home 218.3 vs away 212.9 yds/gm, a 5-yard gap versus a 100-yard spread between best/worst pass defense. Not worth the complexity.
+
+**Why**
+- The QB page had zero opponent context — same distribution shown against the Broncos or the Titans. That's the single biggest gap versus the NBA page, which has had an O/D-adjusted model since March.
+- Checked the data before picking a formula rather than assuming standard fantasy "yards allowed" stats were usable as-is — they weren't (confounded with volume), which is exactly the kind of thing that's cheap to check and expensive to get wrong.
+
+**Next up**
+- Strength-of-schedule is still circular (a defense's rating partly reflects the QBs it happened to face) — the real fix is iterative adjustment (DVOA-style), not a cheap build. Shrinkage damps the worst of it for now.
+- Team/skill-position pages are explicitly out of scope for this pass — QB page only for now.
+
+
+### Same day, cont'd — "Model Read" verdict + a real sanity-check finding
+
+**What changed**
+- Added `computeQbVerdict` (`utils/nflMath.js`) — one OVER/UNDER/NO_BET lean per QB, wired into `/qb/analysis` as a `verdict` object. Uses whichever scope the frontend already defaults to (last season → career → current season fallback), so the verdict and the highlighted scope tab never disagree.
+- `americanToImpliedProb` + `devigFairProbOver`: proportional de-vig (average fair P(over) across every book quoting both sides) — market comparison uses the fair probability, not a vig-included price.
+- `wilsonInterval`: Wilson score interval on the model's own empirical p_over/p_under, used for confidence instead of z-score magnitude.
+- No dollar EV — see below.
+
+**Decisions — and a real finding from testing before shipping**
+- Went in planning to mirror `nbaMath.js`'s `computeConfidenceAndEV`/`computeRecommendation` (z-score tiers, normalCDF win prob, flat -110 EV) until asked to check industry standards instead of assuming NBA's homegrown approach was right. Two real gaps confirmed by research:
+  - Devigging (proportional method) is the standard way to find "edge" — model probability vs. the market's own fair read, not a vig-included price. We already retain both `price_over`/`price_under` per book, so this cost nothing new.
+  - Confidence should widen for small samples. NBA's z-score-magnitude-only approach doesn't — a tight-looking variance from 2 games can produce a "confident" z purely because the sample is small. A Wilson score interval is the standard tool for this and correctly won't over-trust a thin sample the way a raw z-score can.
+  - Also: NFL retains the full historical array (unlike NBA, which only carries mean+variance forward), so win probability can just be the scope's own empirical p_over/p_under — no need for NBA's parametric normalCDF(z) fallback.
+- **Tested against real data before shipping and it failed the smell test**: Mahomes vs. MIA came back OVER / HIGH confidence / 28.6% edge / +$47 EV per $100. The market was pricing that line at ~50% fair (correctly — that's what a well-calibrated line does), while the model's last-season mean (adjusted) sat 37+ yards above it. In a 5-book, heavily-bet NFL player prop market, an edge that size is not a real market miss — it's a sign the model is missing something the book has (game script, weather, injury news, coordinator tendencies) that a season-average-plus-opponent-multiplier model has no way to see.
+- Result: **dropped the dollar EV entirely** rather than ship a number implying a level of confidence this model can't back up. Kept the directional lean, confidence, and edge% (still legitimate, still Wilson-gated) but paired them with an explicit in-UI caveat (Mimir's `VerdictCard`) rather than silently presenting a HIGH-confidence pick.
+- This doesn't fully resolve the underlying issue — a genuinely large, statistically-real (per Wilson) gap between a coarse model and a sharp market will still show as HIGH confidence, because Wilson protects against small-sample noise, not against the model itself being too simple. Flagging that plainly instead of quietly shipping past it.
+
+**Why**
+- The lesson generalizes past this one feature: this model (season average + opponent multiplier) is structurally different from the NBA model (recent matchup-specific O/D inputs, closer in kind to what a book actually uses) — comparisons to a sharp market will read as bigger "edges" than they are until this model has real game-script/injury/weather inputs. Better to say that in the UI than to let a HIGH badge speak for itself.
+
+
 ## 2026-03-15
 
 **What changed**

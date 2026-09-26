@@ -4,11 +4,24 @@ const router = express.Router();
 
 const roster = require("../services/nflverseRoster");
 const stats = require("../services/nflverseStats");
+const defense = require("../services/nflDefense");
 const { listNflEvents, getEventOdds } = require("../services/theOddsApi");
 const TEAM_BY_ABBR = require("../services/nflTeamNames");
 const cache = require("../utils/cache");
 const { isSamePlayer } = require("../utils/nameMatch");
-const { computeMarketDispersion } = require("../utils/nflMath");
+const { computeMarketDispersion, computeQbVerdict } = require("../utils/nflMath");
+const NFL_CFG = require("../config/nfl");
+
+const TEAM_NAME_TO_ABBR = Object.fromEntries(
+  Object.entries(TEAM_BY_ABBR).map(([abbr, name]) => [name, abbr])
+);
+
+/** Given an event and a team's own full name, resolve the opponent's abbreviation. */
+function findOpponentAbbr(event, ownTeamFull) {
+  if (!event) return null;
+  const oppFull = event.home_team === ownTeamFull ? event.away_team : event.home_team;
+  return TEAM_NAME_TO_ABBR[oppFull] || null;
+}
 
 const EVENTS_CACHE_KEY = "odds:events:nfl";
 const EVENTS_TTL_MS = 30 * 60 * 1000; // 30 min (free endpoint)
@@ -321,12 +334,45 @@ router.get("/qb/analysis", async (req, res) => {
       stats.loadQBPassYardsBySeasons(player, [last]),
     ]);
 
-    const scopes = await stats.buildScopedDistributions(player, { currRows, lastRows }, { current, last, minAttempts, line: lineForAnalysis });
+    // --- Opponent matchup adjustment ---
+    const opponentAbbr = findOpponentAbbr(event, teamFull);
+    let matchup = null;
+    if (opponentAbbr) {
+      const profiles = await defense.getDefenseProfiles({ current, prior: last });
+      const profile = profiles[opponentAbbr];
+      if (profile) {
+        matchup = {
+          opponent_abbr: opponentAbbr,
+          opponent_name: TEAM_BY_ABBR[opponentAbbr] || opponentAbbr,
+          ...profile,
+        };
+      }
+    }
+
+    const scopes = await stats.buildScopedDistributions(
+      player, { currRows, lastRows },
+      { current, last, minAttempts, line: lineForAnalysis, matchupFactor: matchup?.matchup_factor ?? 1.0 }
+    );
+
+    // --- Verdict: one recommendation, from whichever scope has the best usable sample ---
+    // Same fallback order the frontend already uses to pick a default scope tab (last season
+    // is a full, stable sample; career risks diluting with very old/irrelevant seasons; current
+    // season is last resort since early on it's 1-3 games).
+    const verdictScopeName =
+      (scopes.last_season?.n || 0) > 0 ? "last_season" :
+      (scopes.career?.n || 0) > 0 ? "career" :
+      "current_season";
+    const verdict = {
+      scope_used: verdictScopeName,
+      ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, oddsPayload?.books, NFL_CFG),
+    };
 
     return res.json({
       player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
       event: event ? { id: event.id, home_team: event.home_team, away_team: event.away_team, commence_time: event.commence_time } : null,
       odds: oddsPayload,
+      matchup,
+      verdict,
       distributions: { attempts_threshold: minAttempts, scopes },
       as_of: new Date().toISOString(),
     });

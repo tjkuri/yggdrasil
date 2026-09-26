@@ -3,7 +3,7 @@ const axios = require("axios");
 const { parse } = require("csv-parse");
 const cache = require("../utils/cache");
 const { isSamePlayer } = require("../utils/nameMatch");
-const { summarize } = require("../utils/nflMath");
+const { summarize, mean } = require("../utils/nflMath");
 
 const BASE = "https://github.com/nflverse/nflverse-data/releases/download/stats_player";
 const TTL_MS = 1000 * 60 * 60 * 12; // 12h
@@ -97,15 +97,21 @@ async function loadQBPassYardsBySeasons(player, seasons) {
  *
  * @param {object} player - Player object (id, name, team_abbr, etc.)
  * @param {{ currRows: object[], lastRows: object[] }} rows - Pre-loaded row data
- * @param {{ current: number, last: number, minAttempts: number, line: number|null }} opts
- * @returns {Promise<object>} Scopes object with current_season, last_season, career keys
+ * @param {{ current: number, last: number, minAttempts: number, line: number|null, matchupFactor?: number }} opts
+ *   matchupFactor rescales every historical game to the upcoming opponent's context
+ *   (see services/nflDefense.js) before computing the distribution; defaults to 1.0 (no adjustment).
+ * @returns {Promise<object>} Scopes object with current_season, last_season, career keys.
+ *   Each scope includes `raw_mean` (unadjusted) alongside the (possibly adjusted) `mean`, so
+ *   callers can show "vs raw" deltas when a matchupFactor is applied.
  */
-async function buildScopedDistributions(player, { currRows, lastRows }, { current, last, minAttempts, line }) {
-  const filterYards = rows => rows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+async function buildScopedDistributions(player, { currRows, lastRows }, { current, last, minAttempts, line, matchupFactor = 1.0 }) {
+  const filterRaw = rows => rows.filter(r => (r.attempts ?? 0) >= minAttempts).map(r => r.yards);
+  const applyFactor = raw => raw.map(y => y * matchupFactor);
+  const fmt1 = v => v != null ? Number(v.toFixed(1)) : null;
 
   // Walk back through seasons to build career values
   const careerSeasons = [];
-  const careerValues = [];
+  const rawCareerValues = [];
   let consecutiveMisses = 0;
   for (let s = current; s >= MIN_CAREER_SEASON; s--) {
     let rows;
@@ -113,10 +119,10 @@ async function buildScopedDistributions(player, { currRows, lastRows }, { curren
     else if (s === last) rows = lastRows;
     else rows = await loadQBPassYardsBySeasons(player, [s]);
 
-    const vals = filterYards(rows);
+    const vals = filterRaw(rows);
     if (vals.length > 0) {
       careerSeasons.push(s);
-      careerValues.push(...vals);
+      rawCareerValues.push(...vals);
       consecutiveMisses = 0;
     } else {
       consecutiveMisses++;
@@ -124,21 +130,24 @@ async function buildScopedDistributions(player, { currRows, lastRows }, { curren
     }
   }
 
-  const scopeCurrent = filterYards(currRows);
-  const scopeLast = filterYards(lastRows);
+  const rawCurrent = filterRaw(currRows);
+  const rawLast = filterRaw(lastRows);
 
   return {
     current_season: {
-      seasons_used: scopeCurrent.length ? [current] : [],
-      ...summarize(scopeCurrent, line),
+      seasons_used: rawCurrent.length ? [current] : [],
+      raw_mean: fmt1(mean(rawCurrent)),
+      ...summarize(applyFactor(rawCurrent), line),
     },
     last_season: {
-      seasons_used: scopeLast.length ? [last] : [],
-      ...summarize(scopeLast, line),
+      seasons_used: rawLast.length ? [last] : [],
+      raw_mean: fmt1(mean(rawLast)),
+      ...summarize(applyFactor(rawLast), line),
     },
     career: {
       seasons_used: careerSeasons.sort((a, b) => a - b),
-      ...summarize(careerValues, line),
+      raw_mean: fmt1(mean(rawCareerValues)),
+      ...summarize(applyFactor(rawCareerValues), line),
     },
   };
 }

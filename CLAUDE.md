@@ -31,6 +31,7 @@ services/
   nbaLogger.js        # Write/update file-based NBA records: writeResultsForDate, writePredictionsForDate (write-once snapshot), backfillLastNDays
   nflverseRoster.js   # NFL roster CSVs from nflverse GitHub releases (12h TTL cache)
   nflverseStats.js    # NFL weekly player stats CSVs from nflverse (12h TTL cache); exports buildScopedDistributions
+  nflDefense.js       # Opponent-adjustment factors per team: pass_ypa_factor + rush_stop_factor ("funnel"), recency-weighted + shrunk toward league avg
   nflTeamNames.js     # Static lookup: team abbreviation → full name
 scripts/
   backfill.js         # One-off backfill helper
@@ -39,10 +40,13 @@ utils/
   cache/              # File-based JSON cache for NBA odds/mylines (keyed by date)
   utils.js            # Sports day helpers (getSportsDayEST — rolls over at 4AM ET, getSportsDayStartISO, getSportsDayEndISO)
   nbaMath.js          # NBA math helpers: weightedMean, weightedVariance, normalCDF
-  nflMath.js          # NFL stats helpers: mean, median, quantile, summarize, computeMarketDispersion, buildHistogram
+  nflMath.js          # NFL stats helpers: mean, median, quantile, summarize, computeMarketDispersion, buildHistogram,
+                      #   americanToImpliedProb, devigFairProbOver, wilsonInterval, computeQbVerdict
   nameMatch.js        # Player name normalization and fuzzy-matching (isSamePlayer) — single source of truth
 config/
   nba.js              # NBA model constants: SAMPLE_SIZE, LAMBDA, HOME_BOOST, Z thresholds, VIG rates
+  nfl.js              # NFL opponent-adjustment + verdict constants: recency weights, shrinkage K per factor, volume
+                      #   dampening exponent, Wilson-interval z and confidence margin
 ```
 
 ## Environment Variables (.env)
@@ -70,8 +74,21 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 1. Load roster CSV (cached) → resolve player
 2. Fetch next team event (free endpoint, 30m cache)
 3. Check odds cache; seed from paid API on miss (1 credit)
-4. Load weekly stats CSVs → build career/last/current season distributions
-5. Return player + event + odds + distributions + timestamp
+4. Resolve opponent abbr from the event, look up their `matchup_factor` via `nflDefense.getDefenseProfiles()`
+5. Load weekly stats CSVs → build career/last/current season distributions, rescaled by the opponent's `matchup_factor` (each scope also returns `raw_mean`, unadjusted, for a "vs raw" comparison)
+6. Pick the authoritative scope (last season → career → current season fallback — same order the frontend uses to pick its default tab) and run `computeQbVerdict()` against it for a single OVER/UNDER/NO_BET lean
+7. Return player + event + odds + matchup + verdict + distributions + timestamp
+
+**Opponent adjustment (`nflDefense.js`)** — two multiplicative factors per team, combined into `matchup_factor`:
+- `pass_ypa_factor` = (pass yds allowed / attempts faced) ÷ league YPA. Efficiency, not raw yards allowed — the DVOA-style approach — so a defense that faces heavy volume isn't mistaken for a bad pass defense.
+- `rush_stop_factor` = league YPC ÷ team YPC allowed, raised to `VOLUME_DAMPEN_EXP`. A stout run defense pushes opponents to throw more (the "pass funnel" effect fantasy sites publish weekly); real in the data (corr ≈ 0.30 with QB attempts faced in 2025) but weaker than the efficiency signal, so it's dampened before folding in.
+- Both factors blend current + prior season (recency-weighted via `RECENCY_WEIGHT_CURRENT`/`_PRIOR`) and shrink toward 1.0 by **distinct-game count**, not row count — a rushing factor naturally has several ball-carrier rows per game (RB/WR/QB scrambles) where the passing factor has ~one qualifying passer row, so aggregation counts must dedupe on `game_id` or the two factors' apparent sample sizes (and therefore how much shrinkage `SHRINK_K_PASS`/`SHRINK_K_RUSH` actually apply) go out of sync.
+- Applied as a single rescale: `adjusted_yards = raw_yards × matchup_factor` across every historical game in every scope — not a filter, so sample size (`n`) is preserved.
+
+**Verdict (`computeQbVerdict` in `nflMath.js`)** — one lean per QB, deliberately without a dollar EV:
+- "Edge" = model probability (the scope's own empirical `p_over`/`p_under`) minus the market's **de-vigged** fair probability (`devigFairProbOver` — proportional method, averaged across every book quoting both sides). Comparing to a vig-included price overstates how much the market actually disagrees with the model.
+- Confidence comes from a **Wilson score interval** (`wilsonInterval`) on the model's own probability, not z-score magnitude — z can look confident off a tiny sample precisely because a small sample produces artificially tight variance; Wilson widens correctly with small n.
+- No dollar EV: tested against live data before shipping and a HIGH-confidence, 28.6%-edge, +$47 read came back for a QB whose market line was priced at ~50% fair by five books. That's not a real market miss in a market this liquid — it's this model (season average + opponent multiplier only, no game-script/weather/injury signal) disagreeing with a much better-informed number. A dollar figure would have implied a confidence the model can't back up. Full writeup in JOURNAL.md (2026-09-26, "cont'd").
 
 **NBA data flow for `/api/nba/totals`**:
 1. Fetch today's scoreboard via `fetchTodayScoreboard()` (→ `fetchScoreboardForDate(getSportsDayEST())`), which passes `?dates=YYYYMMDD` to pin to today's slate. Auto-persist results as fire-and-forget via `nbaLogger.writeResultsForDate` (updates `cache/YYYY-MM-DD-nba-results.json`; locks records once STATUS_FINAL).
@@ -95,4 +112,4 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 | GET | `/api/nfl/qbs` | NFL QB roster list (supports `season`, `active`, `startersOnly`, `limit`) |
 | GET | `/api/nfl/qb/line` | Passing yards market odds for one QB (`playerId`, `refresh`) |
 | GET | `/api/nfl/qb/passing-yards` | Historical passing yards distributions (`playerId`, `line`, `minAttempts`) |
-| GET | `/api/nfl/qb/analysis` | Combined odds + distributions (`playerId`, `refreshOdds`, `minAttempts`, `line`) |
+| GET | `/api/nfl/qb/analysis` | Combined odds + opponent-adjusted distributions + one-scope verdict (`playerId`, `refreshOdds`, `minAttempts`, `line`) |

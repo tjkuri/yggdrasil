@@ -9,7 +9,7 @@ Node.js/Express API on port 3001. Pulls from third-party sports APIs, does the s
 
 **NBA Logging** — Persists daily prediction snapshots and final scores to `cache/` for analysis by the sibling [Huginn](https://github.com/tjkuri/huginn) repo.
 
-**NFL** — QB passing yards analysis. Roster from nflverse CSVs, odds from The Odds API, historical distributions built from nflverse weekly stats. The `/qb/analysis` endpoint combines all three.
+**NFL** — QB passing yards analysis. Roster from nflverse CSVs, odds from The Odds API, historical distributions built from nflverse weekly stats, rescaled for the upcoming opponent's pass-defense efficiency and "funnel" effect. The `/qb/analysis` endpoint combines all of that plus a single de-vigged, Wilson-gated OVER/UNDER lean — deliberately without a dollar EV, since this model has no game-script/weather/injury signal and testing showed that combination overclaims confidence in a market this liquid.
 
 ## Further Reading
 Have a [Journal.md](JOURNAL.md) where I try to keep track of lessons learned and design decisions. Obviously a Jira-like system would be more professional but it's just me.
