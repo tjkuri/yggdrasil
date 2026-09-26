@@ -13,9 +13,10 @@ const CACHE_DIR = path.join(__dirname, "../cache/nfl-predictions");
  *   existed for this (season, week, player) or required fields were missing.
  */
 async function logPredictionIfNew({ season, week, player, opponentAbbr, line, scopeUsed, verdict, adjustedMean }) {
-  if (season == null || week == null || !player?.id) return false;
+  if (season == null || week == null || !player?.id || line == null) return false;
 
-  const filePath = path.join(CACHE_DIR, `${season}-wk${String(week).padStart(2, "0")}-${player.id}.json`);
+  const safeId = String(player.id).replace(/[^A-Za-z0-9._-]/g, "_");
+  const filePath = path.join(CACHE_DIR, `${season}-wk${String(week).padStart(2, "0")}-${safeId}.json`);
   const data = {
     player_id: player.id,
     player_name: player.name,
