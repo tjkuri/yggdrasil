@@ -3,12 +3,11 @@ const utils = require('../utils/utils');
 const fs = require('fs');
 
 require('dotenv').config(); //allows us to import variables from .env
-const oddsApiKey = process.env.ODDS_API_KEY;
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const ODDS_HOST = process.env.ODDS_HOST || "https://api.the-odds-api.com";
 
 module.exports = {
-    fetchNbaTodayGames, fetchNbaTodayLines, listNflEvents, getEventOdds, fetchMlbOdds
+    fetchNbaTodayLines, listNflEvents, getEventOdds, fetchMlbOdds
 };
 
 /**
@@ -38,11 +37,6 @@ async function getEventOdds(eventId, { market = "player_pass_yds", regions = "us
 
 
 /**
- * Use Odds-API to fetch a list of NBA games scheduled for today (start time is between 10AM - 1130PM)
- * @returns {Array<object>} List of jsons each representing an NBA game scheduled for today
- * @throws {Error} - if the try statement throws an error, it is logged and raised again for callers to handle
- */
-/**
  * Fetch MLB odds (h2h, totals, spreads) from DraftKings.
  * Returns all upcoming games — caller filters to future-only.
  * Costs 3 credits (1 per market).
@@ -63,31 +57,6 @@ async function fetchMlbOdds() {
 }
 
 
-async function fetchNbaTodayGames() {
-    // config with request params
-    var requestConfig = {
-        params: {
-            apiKey: oddsApiKey,
-            commenceTimeFrom: utils.getSportsDayStartISO(),
-            commenceTimeTo: utils.getSportsDayEndISO(),
-            // dateFormat: 'unix'
-        },
-      }
-
-    try {
-        console.log('Fetching NBA games Today from odd-api')
-        const response = await axios.get('https://api.the-odds-api.com/v4/sports/basketball_nba/events', requestConfig)
-        console.log(requestConfig.params)
-        console.log('Remaining requests',response.headers['x-requests-remaining'])
-        console.log('Used requests',response.headers['x-requests-used'])
-        return response.data; // Return the data from the API response
-    } catch (error) { // Handle errors appropriately (e.g., throw an error or return a default value)
-        console.error(error);
-        throw error; // Re-throw the error to allow callers to handle it
-    }
-  }
-
-
 /**
  * Fetch the games and total point lines in the NBA today. NOTE: only returns games where bookmakers
  * still have lines open
@@ -96,7 +65,7 @@ async function fetchNbaTodayGames() {
 async function fetchNbaTodayLines() {
     var requestConfig = {
         params: {
-            apiKey: oddsApiKey,
+            apiKey: ODDS_API_KEY,
             commenceTimeFrom: utils.getSportsDayStartISO(),
             commenceTimeTo: utils.getSportsDayEndISO(),
             regions: 'us',
