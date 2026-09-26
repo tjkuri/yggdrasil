@@ -8,11 +8,6 @@ const path = require("path");
 
 const CACHE_DIR = path.join(__dirname, "../cache/nfl-predictions");
 
-async function writeJsonFile(filePath, data) {
-  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), "utf-8");
-}
-
 /**
  * @returns {Promise<boolean>} true if a new snapshot was written, false if one already
  *   existed for this (season, week, player) or required fields were missing.
@@ -21,9 +16,7 @@ async function logPredictionIfNew({ season, week, player, opponentAbbr, line, sc
   if (season == null || week == null || !player?.id) return false;
 
   const filePath = path.join(CACHE_DIR, `${season}-wk${String(week).padStart(2, "0")}-${player.id}.json`);
-  if (fs.existsSync(filePath)) return false;
-
-  await writeJsonFile(filePath, {
+  const data = {
     player_id: player.id,
     player_name: player.name,
     team_abbr: player.team_abbr,
@@ -35,8 +28,16 @@ async function logPredictionIfNew({ season, week, player, opponentAbbr, line, sc
     verdict,
     adjusted_mean: adjustedMean,
     logged_at: new Date().toISOString(),
-  });
-  return true;
+  };
+
+  try {
+    await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.promises.writeFile(filePath, JSON.stringify(data, null, 2), { flag: "wx", encoding: "utf-8" });
+    return true;
+  } catch (err) {
+    if (err.code === "EEXIST") return false;
+    throw err;
+  }
 }
 
 module.exports = { logPredictionIfNew };
