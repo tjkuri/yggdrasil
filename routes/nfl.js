@@ -5,6 +5,8 @@ const router = express.Router();
 const roster = require("../services/nflverseRoster");
 const stats = require("../services/nflverseStats");
 const defense = require("../services/nflDefense");
+const nflSchedule = require("../services/nflSchedule");
+const nflLogger = require("../services/nflLogger");
 const { listNflEvents, getEventOdds } = require("../services/theOddsApi");
 const TEAM_BY_ABBR = require("../services/nflTeamNames");
 const cache = require("../utils/cache");
@@ -366,6 +368,22 @@ router.get("/qb/analysis", async (req, res) => {
       scope_used: verdictScopeName,
       ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, oddsPayload?.books, NFL_CFG),
     };
+
+    // --- Log prediction snapshot (fire-and-forget, write-once by season+week+player) ---
+    if (opponentAbbr && event) {
+      const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
+      const awayAbbr = TEAM_NAME_TO_ABBR[event.away_team];
+      nflSchedule.getWeekForMatchup({ season: current, homeAbbr, awayAbbr })
+        .then(week => {
+          if (week == null) return;
+          return nflLogger.logPredictionIfNew({
+            season: current, week, player, opponentAbbr,
+            line: lineForAnalysis, scopeUsed: verdictScopeName, verdict,
+            adjustedMean: scopes[verdictScopeName]?.mean ?? null,
+          });
+        })
+        .catch(err => console.error("[nflLogger] failed:", err.message));
+    }
 
     return res.json({
       player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
