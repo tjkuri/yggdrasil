@@ -18,6 +18,8 @@ const TEAM_NAME_TO_ABBR = Object.fromEntries(
   Object.entries(TEAM_BY_ABBR).map(([abbr, name]) => [name, abbr])
 );
 
+const espnNflApi = require("../services/espnNflApi");
+
 /** Given an event and a team's own full name, resolve the opponent's abbreviation. */
 function findOpponentAbbr(event, ownTeamFull) {
   if (!event) return null;
@@ -161,6 +163,69 @@ router.get("/qbs", async (req, res) => {
     res.json({ season, players: qbs });
   } catch (err) {
     res.status(500).json({ error: "roster_error", message: err?.message || "Failed to load rosters." });
+  }
+});
+
+/**
+ * GET /api/nfl/week
+ * This week's full schedule with each side's resolved starting QB (via ESPN's own
+ * depth chart) and whether that QB already has a DraftKings market cached. Never
+ * triggers a fresh paid odds fetch — see Global Constraints.
+ */
+router.get("/week", async (req, res) => {
+  try {
+    const year = new Date().getFullYear();
+    const [{ players: allQBs }, { data: oddsEvents }, scoreboard] = await Promise.all([
+      roster.getQBs(year),
+      getEventsCached(),
+      espnNflApi.fetchWeekScoreboard(),
+    ]);
+
+    async function resolveSide(side) {
+      if (!side) return null;
+      const chart = await espnNflApi.fetchDepthChart(side.espn_team_id);
+      const starterName = chart[0]?.displayName || null;
+      const match = starterName
+        ? allQBs.find(p => p.team_abbr === side.abbr && isSamePlayer(p.name, starterName))
+        : null;
+
+      let marketPosted = false;
+      if (match) {
+        const teamFull = TEAM_BY_ABBR[side.abbr];
+        const oddsEvent = teamFull
+          ? oddsEvents.find(e => e.home_team === teamFull || e.away_team === teamFull)
+          : null;
+        if (oddsEvent) {
+          const key = `odds:nfl:${oddsEvent.id}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
+          const cached = cache.get(key); // no TTL → never expires, matches existing odds-cache convention
+          if (cached) {
+            const books = extractPlayerBooks(cached.data, match.name);
+            marketPosted = books.some(b => b.book === "draftkings" && typeof b.point === "number");
+          }
+        }
+      }
+
+      return {
+        abbr: side.abbr,
+        name: side.name,
+        score: side.score,
+        qb: match ? { id: match.id, slug: match.slug, name: match.name, market_posted: marketPosted } : null,
+      };
+    }
+
+    const games = await Promise.all(scoreboard.map(async g => ({
+      espn_event_id: g.id,
+      commence_time: g.commence_time,
+      state: g.state,
+      short_detail: g.short_detail,
+      home: await resolveSide(g.home),
+      away: await resolveSide(g.away),
+    })));
+
+    res.json({ season: year, games });
+  } catch (err) {
+    console.error("nfl/week error:", err?.response?.data || err.message);
+    res.status(500).json({ error: "Failed to build week schedule", detail: err.message });
   }
 });
 
