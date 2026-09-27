@@ -75,9 +75,9 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 2. Fetch next team event (free endpoint, 30m cache)
 3. Check odds cache; seed from paid API on miss (1 credit)
 4. Resolve opponent abbr from the event, look up their `matchup_factor` via `nflDefense.getDefenseProfiles()`
-5. Load weekly stats CSVs → build career/last/current season distributions, rescaled by the opponent's `matchup_factor` (each scope also returns `raw_mean`, unadjusted, for a "vs raw" comparison)
-6. Pick the authoritative scope (last season → career → current season fallback — same order the frontend uses to pick its default tab) and run `computeQbVerdict()` against it for a single OVER/UNDER/NO_BET lean
-7. Return player + event + odds + matchup + verdict + distributions + timestamp
+5. Load weekly stats CSVs → build career/last/current season distributions, rescaled by the opponent's `matchup_factor` (each scope also returns `raw_mean` and `raw_p_over`/`raw_p_under`, unadjusted, alongside the adjusted `mean`/`p_over`/`p_under`)
+6. Pick the authoritative scope (last season → career → current season fallback — same order the frontend uses to pick its default tab). Pick the pricing basis: DraftKings if it's quoting both sides of the market, else the full consensus book set (`market_basis: { used, requested, fell_back }` in the response). Run `computeQbVerdict()` against that scope and basis for a single OVER/UNDER/NO_BET `recommendation`, plus an always-populated `lean` field that names which way the model reads even when `recommendation` collapses to `NO_BET`.
+7. Return player + event + odds + `line` (the line actually used for the verdict — DK's or the fallback consensus) + `market_basis` + matchup + verdict + distributions + timestamp
 
 **Opponent adjustment (`nflDefense.js`)** — two multiplicative factors per team, combined into `matchup_factor`:
 - `pass_ypa_factor` = (pass yds allowed / attempts faced) ÷ league YPA. Efficiency, not raw yards allowed — the DVOA-style approach — so a defense that faces heavy volume isn't mistaken for a bad pass defense.

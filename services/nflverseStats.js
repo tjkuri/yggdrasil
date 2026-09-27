@@ -133,20 +133,31 @@ async function buildScopedDistributions(player, { currRows, lastRows }, { curren
   const rawCurrent = filterRaw(currRows);
   const rawLast = filterRaw(lastRows);
 
+  // Unadjusted P(over)/P(under) against the same line — lets the frontend show the raw
+  // historical rate and the opponent-adjusted rate as two distinct, honest steps, rather
+  // than presenting an already-rescaled rate as if it were a literal count of games.
+  const rawRate = raw => {
+    const s = summarize(raw, line);
+    return { raw_p_over: s.p_over, raw_p_under: s.p_under };
+  };
+
   return {
     current_season: {
       seasons_used: rawCurrent.length ? [current] : [],
       raw_mean: fmt1(mean(rawCurrent)),
+      ...rawRate(rawCurrent),
       ...summarize(applyFactor(rawCurrent), line),
     },
     last_season: {
       seasons_used: rawLast.length ? [last] : [],
       raw_mean: fmt1(mean(rawLast)),
+      ...rawRate(rawLast),
       ...summarize(applyFactor(rawLast), line),
     },
     career: {
       seasons_used: careerSeasons.sort((a, b) => a - b),
       raw_mean: fmt1(mean(rawCareerValues)),
+      ...rawRate(rawCareerValues),
       ...summarize(applyFactor(rawCareerValues), line),
     },
   };

@@ -2,6 +2,20 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-09-27
+
+**What changed**
+- `computeQbVerdict` (`utils/nflMath.js`) now returns a `lean` field alongside the gated `recommendation` — `recommendation` still collapses to `NO_BET` once confidence is LOW or edge ≤ 0, but `lean` always names which way the model actually reads, gated or not. Added to both the real return object and the `empty` fallback.
+- `services/nflverseStats.js`: `buildScopedDistributions` now also returns `raw_p_over`/`raw_p_under` per scope — the over/under rate against the *unadjusted* raw yardage, alongside the existing adjusted `p_over`/`p_under` and `raw_mean`.
+- `routes/nfl.js`: `/qb/analysis` now prefers DraftKings for the actual verdict math when DK is quoting both sides of the market, falling back to the full consensus book set otherwise. Response gains `line` (the line actually used, DK's or the fallback consensus) and `market_basis: { used, requested, fell_back }` so the frontend can show which basis produced the number.
+
+**Why**
+- Mimir's redesign needed a way to say "the model leans X" even when the read doesn't clear the confidence/edge bar to act on — `recommendation` alone couldn't express that once it collapsed to `NO_BET`, the frontend had no way to know which way the model was actually leaning. `lean` fixes that without touching the existing gate.
+- `raw_p_over`/`raw_p_under` let the frontend state the verdict sentence's first step as a real fact ("he was under 237.5 in 8 of his last 13 games") before showing what the opponent adjustment does to it — previously that raw rate wasn't exposed at all, only the adjusted one.
+- The user bets DraftKings specifically — the number the tool computes edge/confidence against should be the number they'd actually get, not a blended consensus, with a transparent fallback when DK isn't posting a line yet.
+- Verified live via curl against `jackson-lamar` after the change: `market_basis: {"used":"draftkings",...}`, matches the frontend's independently-verified render exactly.
+
+
 ## 2026-09-26
 
 **What changed**

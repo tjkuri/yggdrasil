@@ -181,7 +181,7 @@ function wilsonInterval(p, n, z) {
  */
 function computeQbVerdict(scope, line, books, cfg) {
   const { WILSON_Z, CONFIDENCE_MARGIN } = cfg;
-  const empty = { recommendation: null, confidence: null, win_probability: null, market_fair_probability: null, edge: null, z_score: null };
+  const empty = { recommendation: null, lean: null, confidence: null, win_probability: null, market_fair_probability: null, edge: null, z_score: null };
   if (!scope || !scope.n || line == null || scope.p_over == null) return empty;
 
   const fairOver = devigFairProbOver(books);
@@ -213,6 +213,11 @@ function computeQbVerdict(scope, line, books, cfg) {
 
   return {
     recommendation,
+    // `side` is which way the model leans regardless of whether recommendation clears the
+    // NO_BET gate — a LOW-confidence (or no-edge) read is still a read. Without this, a NO_BET
+    // result loses its own direction: the frontend has no way to say "leans under, just not
+    // enough to call" versus a genuine coin flip.
+    lean: side,
     confidence,
     win_probability: Number((modelProb * 100).toFixed(1)),
     market_fair_probability: fairProb != null ? Number((fairProb * 100).toFixed(1)) : null,

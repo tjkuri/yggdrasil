@@ -327,8 +327,19 @@ router.get("/qb/analysis", async (req, res) => {
       };
     }
 
+    // --- Market basis: prefer DraftKings for the line and the edge math, since that's what
+    // this is actually used against; fall back to consensus (never silently) when DK isn't
+    // quoting this player yet. An explicit ?line= override still wins over both.
+    const dkBook = (oddsPayload?.books || []).find(
+      b => b.book === "draftkings" && typeof b.point === "number" && b.price_over != null && b.price_under != null
+    );
+    const marketBasis = dkBook
+      ? { used: "draftkings", requested: "draftkings", fell_back: false }
+      : { used: "consensus", requested: "draftkings", fell_back: (oddsPayload?.books?.length || 0) > 0 };
+    const booksForVerdict = dkBook ? [dkBook] : oddsPayload?.books;
+
     // --- Distributions ---
-    const lineForAnalysis = lineOverride ?? oddsPayload?.consensus_line ?? null;
+    const lineForAnalysis = lineOverride ?? (dkBook ? dkBook.point : oddsPayload?.consensus_line) ?? null;
     const current = year, last = year - 1;
 
     const [currRows, lastRows] = await Promise.all([
@@ -366,7 +377,7 @@ router.get("/qb/analysis", async (req, res) => {
       "current_season";
     const verdict = {
       scope_used: verdictScopeName,
-      ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, oddsPayload?.books, NFL_CFG),
+      ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, booksForVerdict, NFL_CFG),
     };
 
     // --- Log prediction snapshot (fire-and-forget, write-once by season+week+player) ---
@@ -392,6 +403,8 @@ router.get("/qb/analysis", async (req, res) => {
       player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
       event: event ? { id: event.id, home_team: event.home_team, away_team: event.away_team, commence_time: event.commence_time } : null,
       odds: oddsPayload,
+      line: lineForAnalysis,
+      market_basis: marketBasis,
       matchup,
       verdict,
       distributions: { attempts_threshold: minAttempts, scopes },
