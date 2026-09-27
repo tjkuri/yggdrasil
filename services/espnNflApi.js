@@ -83,7 +83,7 @@ async function fetchGameSummary(espnEventId) {
       const yards = ydsIdx >= 0 ? Number(a.stats[ydsIdx]) : null;
       passing.push({
         name: a.athlete.displayName,
-        team_abbr: team.team.abbreviation,
+        team_abbr: normalizeEspnAbbr(team.team.abbreviation),
         yards: Number.isFinite(yards) ? yards : null,
       });
     }
