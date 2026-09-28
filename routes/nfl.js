@@ -62,16 +62,35 @@ function findNextEventForTeam(events, fullTeamName) {
   return next?.e || null;
 }
 
+/** Stable, order-independent cache key for "the odds-api event for this team pair," so a
+ * matchup stays resolvable after it drops off the free /events list — confirmed live: that
+ * list doesn't retain Final games, it replaces them with next week's slate. No TTL: persists
+ * exactly as long as the odds blobs themselves already do (manual-refresh-only convention). */
+function matchupCacheKey(teamAFull, teamBFull) {
+  return `odds:nfl:matchup-event:${[teamAFull, teamBFull].sort().join("|")}`;
+}
+function rememberOddsEvent(event) {
+  if (!event) return;
+  cache.set(matchupCacheKey(event.home_team, event.away_team), event);
+}
+function recallOddsEvent(teamAFull, teamBFull) {
+  return cache.get(matchupCacheKey(teamAFull, teamBFull)); // no ttl arg -> never expires
+}
+
 /** Resolve the event for a SPECIFIC matchup (past, live, or future) — unlike
  * findNextEventForTeam, this doesn't filter by time, since the caller already knows
  * exactly which game it means (from /api/nfl/week). */
 function findEventForMatchup(events, ownTeamFull, opponentAbbr) {
   const oppFull = TEAM_BY_ABBR[opponentAbbr];
   if (!oppFull) return null;
-  return events.find(e =>
-    (e.home_team === ownTeamFull && e.away_team === oppFull) ||
-    (e.away_team === ownTeamFull && e.home_team === oppFull)
-  ) || null;
+  const live = events.find(e =>
+    e && ((e.home_team === ownTeamFull && e.away_team === oppFull) ||
+    (e.away_team === ownTeamFull && e.home_team === oppFull))
+  );
+  if (live) { rememberOddsEvent(live); return live; }
+  // Live list has no match — most likely this game already went Final and was replaced by
+  // next week's slate. Fall back to whatever we remembered from an earlier lookup this week.
+  return recallOddsEvent(ownTeamFull, oppFull) || null;
 }
 
 /**
@@ -208,6 +227,7 @@ router.get("/week", async (req, res) => {
           ? oddsEvents.find(e => e.home_team === teamFull || e.away_team === teamFull)
           : null;
         if (oddsEvent) {
+          rememberOddsEvent(oddsEvent); // populate matchup memory before this game can go Final and drop off the free events list
           const key = `odds:nfl:${oddsEvent.id}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
           const cached = cache.get(key); // no TTL → never expires, matches existing odds-cache convention
           if (cached) {
@@ -368,43 +388,59 @@ router.get("/qb/analysis", async (req, res) => {
       ? findEventForMatchup(events, teamFull, opponentAbbrParam)
       : findNextEventForTeam(events, teamFull);
 
+    const isPastKickoff = !!(event && Date.parse(event.commence_time) < Date.now());
+    const effectiveWantsRefresh = wantsRefresh && !isPastKickoff; // never allow refresh after kickoff
+
     let oddsPayload;
     if (!event) {
       oddsPayload = {
         market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
         consensus_line: null, book_count: 0, books: [], as_of: null,
         cache: { hit: true, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
-        credits: null, no_upcoming_game: true,
+        credits: null, no_upcoming_game: true, market_captured: false,
       };
     } else {
       const ODDS_CACHE_KEY = `odds:nfl:${event.id}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
       const cached = cache.get(ODDS_CACHE_KEY);
 
-      let oddsBlob, oddsMeta, cacheHit = false, seeded = false;
-      if (cached && !wantsRefresh) {
-        ({ data: oddsBlob, meta: oddsMeta } = cached); cacheHit = true;
-      } else if (!cached) {
-        ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY)); seeded = true;
+      if (isPastKickoff && !cached) {
+        // Never seed a fresh paid fetch for a game that's already started — the market's
+        // closed. Distinct from no_upcoming_game: this game IS real, we just never
+        // captured its market before kickoff.
+        oddsPayload = {
+          market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
+          consensus_line: null, book_count: 0, books: [], as_of: null,
+          cache: { hit: false, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
+          credits: null, no_upcoming_game: false, market_captured: false,
+        };
       } else {
-        ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY));
+        let oddsBlob, oddsMeta, cacheHit = false, seeded = false;
+        if (cached && !effectiveWantsRefresh) {
+          ({ data: oddsBlob, meta: oddsMeta } = cached); cacheHit = true;
+        } else if (!cached) {
+          ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY)); seeded = true;
+        } else {
+          ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY));
+        }
+
+        const books = extractPlayerBooks(oddsBlob, player.name);
+        const dispersion = computeMarketDispersion(books);
+
+        oddsPayload = {
+          market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
+          ...dispersion,
+          book_count: books.length,
+          books,
+          as_of: oddsMeta?.fetchedAt || null,
+          cache: {
+            hit: cacheHit, seeded_on_miss: seeded, key: ODDS_CACHE_KEY,
+            age_minutes: oddsMeta?.fetchedAt ? Math.round((Date.now() - Date.parse(oddsMeta.fetchedAt)) / 60000) : null,
+            needs_refresh: false,
+          },
+          credits: oddsMeta?.headers || null,
+          no_upcoming_game: false, market_captured: true,
+        };
       }
-
-      const books = extractPlayerBooks(oddsBlob, player.name);
-      const dispersion = computeMarketDispersion(books);
-
-      oddsPayload = {
-        market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
-        ...dispersion,
-        book_count: books.length,
-        books,
-        as_of: oddsMeta?.fetchedAt || null,
-        cache: {
-          hit: cacheHit, seeded_on_miss: seeded, key: ODDS_CACHE_KEY,
-          age_minutes: oddsMeta?.fetchedAt ? Math.round((Date.now() - Date.parse(oddsMeta.fetchedAt)) / 60000) : null,
-          needs_refresh: false,
-        },
-        credits: oddsMeta?.headers || null,
-      };
     }
 
     // --- Market basis: prefer DraftKings for the line and the edge math, since that's what
@@ -483,6 +519,7 @@ router.get("/qb/analysis", async (req, res) => {
       player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
       event: event ? { id: event.id, home_team: event.home_team, away_team: event.away_team, commence_time: event.commence_time } : null,
       odds: oddsPayload,
+      odds_locked: isPastKickoff,
       line: lineForAnalysis,
       market_basis: marketBasis,
       matchup,
