@@ -24,9 +24,10 @@ No test suite is configured yet.
 server.js             # Express entry point, CORS (localhost:3000 only), route mounting
 routes/
   nba.js              # GET /api/nba/totals — today's games with my line vs DK odds
-  nfl.js              # GET /api/nfl/qbs, /qb/line, /qb/passing-yards, /qb/analysis
+  nfl.js              # GET /api/nfl/qbs, /week, /qb/line, /qb/passing-yards, /qb/analysis
 services/
   espnNbaApi.js       # NBA scoreboard + team schedules via ESPN unofficial API (no key, 5m/1h/24h TTL); fetchScoreboardForDate(dateStr) + fetchTodayScoreboard() + fetchLastNTeamGames (regulation-only) + fetchLastNTeamGamesTotal (full incl. OT) + fetchGameSummary
+  espnNflApi.js       # NFL scoreboard + depth charts + boxscores via ESPN unofficial API (no key, 5m/12h/12h TTL); fetchWeekScoreboard() + fetchDepthChart(espnTeamId) + fetchGameSummary(espnEventId) + normalizeEspnAbbr (ESPN's LAR/WSH -> this codebase's LA/WAS — confirmed live as the only 2 of 32 teams that differ)
   theOddsApi.js       # Sportsbook odds (NBA totals, NFL passing yards) via The Odds API
   nbaLogger.js        # Write/update file-based NBA records: writeResultsForDate, writePredictionsForDate (write-once snapshot), backfillLastNDays
   nflverseRoster.js   # NFL roster CSVs from nflverse GitHub releases (12h TTL cache)
@@ -72,12 +73,20 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 
 **NFL data flow for `/qb/analysis`** (the main combined endpoint):
 1. Load roster CSV (cached) → resolve player
-2. Fetch next team event (free endpoint, 30m cache)
-3. Check odds cache; seed from paid API on miss (1 credit)
+2. Resolve the event via `findEventForMatchup` (optional `opponentAbbr` query param resolves a *specific* matchup — past, live, or future) or `findNextEventForTeam` (default when `opponentAbbr` is omitted — next future event only, the original behavior)
+3. Compute `isPastKickoff` from the resolved event's `commence_time`, exposed as top-level `odds_locked`. Check odds cache; seed from the paid API on a miss (1 credit) — **unless** `odds_locked` is true, in which case a never-captured market stays uncaptured and `refreshOdds=true` is silently ignored (the market's closed, there's nothing fresher to fetch). `odds.market_captured: false` means "this game is real but its market was never grabbed before kickoff" — distinct from the pre-existing `odds.no_upcoming_game` ("no game scheduled for this team at all").
 4. Resolve opponent abbr from the event, look up their `matchup_factor` via `nflDefense.getDefenseProfiles()`
 5. Load weekly stats CSVs → build career/last/current season distributions, rescaled by the opponent's `matchup_factor` (each scope also returns `raw_mean` and `raw_p_over`/`raw_p_under`, unadjusted, alongside the adjusted `mean`/`p_over`/`p_under`)
 6. Pick the authoritative scope (last season → career → current season fallback — same order the frontend uses to pick its default tab). Pick the pricing basis: DraftKings if it's quoting both sides of the market, else the full consensus book set (`market_basis: { used, requested, fell_back }` in the response). Run `computeQbVerdict()` against that scope and basis for a single OVER/UNDER/NO_BET `recommendation`, plus an always-populated `lean` field that names which way the model reads even when `recommendation` collapses to `NO_BET`.
-7. Return player + event + odds + `line` (the line actually used for the verdict — DK's or the fallback consensus) + `market_basis` + matchup + verdict + distributions + timestamp
+7. If the caller passes `espnEventId` (opt-in — the frontend already has it from `/api/nfl/week`, so this route trusts it rather than re-deriving the game) and that ESPN game's state is `post` (Final), fetch its boxscore (`espnNflApi.fetchGameSummary`) and compare the QB's actual passing yards to the line and verdict `lean` → top-level `actual_result: { yards, outcome: "hit"|"miss" }` (`null` when omitted or not yet Final).
+8. Return player + event + odds + `odds_locked` + `line` (the line actually used for the verdict — DK's or the fallback consensus) + `market_basis` + matchup + verdict + `actual_result` + distributions + timestamp
+
+**Matchup-event resolution and a real Odds API quirk (`routes/nfl.js`)** — The Odds API's free `/events` endpoint doesn't just eventually drop a Final game, it replaces the whole slate with next week's games the moment a game goes Final. That silently broke `opponentAbbr`-based matchup lookup for any already-Final game (live-list search comes up empty). Fixed with a persisted team-pair → event memory, next to `findEventForMatchup`:
+- `matchupCacheKey(teamAFull, teamBFull)` — order-independent key, no TTL (same manual-refresh convention as the odds blobs themselves)
+- `rememberOddsEvent(event)` — called every time an event is resolved live, both inside `/qb/analysis` and proactively by `GET /api/nfl/week` on every schedule load, so a game is remembered well before it can go Final and vanish from the free list
+- `recallOddsEvent(teamAFull, teamBFull)` — the fallback once the live list has no match; refuses to return a remembered event whose `commence_time` is still in the future, guarding against a division-rival rematch (same two teams meet twice in a season) overwriting an earlier Final game's memory with the not-yet-played one
+
+**`GET /api/nfl/week`** — this week's full schedule via `espnNflApi.fetchWeekScoreboard()`. For each side, resolves the starting QB from ESPN's own depth chart (`fetchDepthChart`, first athlete listed) matched back to the roster via `isSamePlayer`, and reports `qb.market_posted` by checking — never seeding — the existing odds cache for a two-sided DraftKings line (a cache miss just means `false`, never a paid fetch). Also calls `rememberOddsEvent` for every event it touches, proactively populating the matchup memory described above.
 
 **Opponent adjustment (`nflDefense.js`)** — two raw ratios per team, each shrunk toward 1.0, combined into `matchup_factor`:
 - `shrink(raw, n, k) = (n·raw + k·1.0) / (n + k)` — pulls a factor toward league-average (1.0) when its weighted sample `n` is thin, controlled by `SHRINK_K_PASS`/`SHRINK_K_RUSH`.
@@ -113,6 +122,7 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 | GET | `/api/nba/backfill` | Backfill results + predictions for last 3 sports days (idempotent) |
 | GET | `/api/nfl/health` | Health check |
 | GET | `/api/nfl/qbs` | NFL QB roster list (supports `season`, `active`, `startersOnly`, `limit`) |
+| GET | `/api/nfl/week` | This week's schedule with each side's resolved starting QB and DK market-posted flag; never triggers a paid odds fetch |
 | GET | `/api/nfl/qb/line` | Passing yards market odds for one QB (`playerId`, `refresh`) |
 | GET | `/api/nfl/qb/passing-yards` | Historical passing yards distributions (`playerId`, `line`, `minAttempts`) |
-| GET | `/api/nfl/qb/analysis` | Combined odds + opponent-adjusted distributions + one-scope verdict (`playerId`, `refreshOdds`, `minAttempts`, `line`) |
+| GET | `/api/nfl/qb/analysis` | Combined odds + opponent-adjusted distributions + one-scope verdict (`playerId`, `refreshOdds`, `minAttempts`, `line`, `opponentAbbr`, `espnEventId`) |

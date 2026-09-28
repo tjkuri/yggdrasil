@@ -16,6 +16,25 @@ The front end repo mimir has its own version of this, trying to keep notes in th
 - Verified live via curl against `jackson-lamar` after the change: `market_basis: {"used":"draftkings",...}`, matches the frontend's independently-verified render exactly.
 
 
+### Same day, cont'd — matchup-first navigation: a week view, matchup resolution, odds locking, and graded results
+
+**What changed**
+- New `services/espnNflApi.js`, mirroring `espnNbaApi.js`'s pattern: `fetchWeekScoreboard()` (5m TTL), `fetchDepthChart(espnTeamId)` (12h TTL), `fetchGameSummary(espnEventId)` (12h TTL), and `normalizeEspnAbbr` — confirmed live against all 32 teams during planning that ESPN's `LAR`/`WSH` are the *only* two abbreviations that differ from this codebase's `LA`/`WAS` convention; normalized at this one integration boundary.
+- New `GET /api/nfl/week` — this week's schedule, each side's starting QB resolved from ESPN's own depth chart and matched to the roster via `isSamePlayer`, plus a `qb.market_posted` flag that only ever reads the existing odds cache (never seeds a paid fetch).
+- `routes/nfl.js`: `/qb/analysis` gained `opponentAbbr` — resolves a *specific* matchup (past, live, or future) via new `findEventForMatchup`, instead of only ever finding the next future event for the team (`findNextEventForTeam`, still the default when `opponentAbbr` is omitted).
+- Response gained top-level `odds_locked` (true once the resolved event's kickoff has passed) and `odds.market_captured` (distinct from the pre-existing `odds.no_upcoming_game` — `false` means the game is real but its market was never captured before kickoff). Once `odds_locked` is true, `/qb/analysis` never seeds a fresh paid odds fetch and silently ignores `refreshOdds=true`.
+- `/qb/analysis` gained opt-in `espnEventId`: when present and that ESPN game is Final, fetches its boxscore and adds top-level `actual_result: { yards, outcome: "hit"|"miss" }`, graded against the line actually used and the verdict's `lean`.
+
+**A real bug caught during review, worth documenting since it's non-obvious**
+- The Odds API's free `/events` endpoint doesn't just eventually drop a Final game — the instant a game goes Final, the endpoint replaces the *entire* slate with next week's games. That silently broke `opponentAbbr` matchup resolution for any already-Final game: the live list search would come up empty with no signal why.
+- Fixed with a persisted team-pair → event memory, next to `findEventForMatchup`: `matchupCacheKey` (order-independent, no TTL — same manual-refresh convention as the odds blobs), `rememberOddsEvent`, `recallOddsEvent`. Populated every time an event is resolved live — both by `/qb/analysis` itself and proactively by `GET /api/nfl/week` on every schedule load, so a game is remembered well before it can vanish from the free list.
+- A follow-up review pass then caught a second, related issue: `recallOddsEvent` would happily hand back a remembered event that's actually a future game, if the same two teams play twice in a season (division rivals) and the later meeting's live lookup overwrote the earlier Final game's memory entry. Fixed by having `recallOddsEvent` refuse any remembered event whose `commence_time` is still in the future — recall is biased toward "the game that already happened," which is the only case it's meant to cover (the live list is always tried first).
+
+**Why**
+- Mimir's redesign is moving to matchup-first navigation (pick a game off a week view, not a QB off a dropdown) — `/api/nfl/week` and `opponentAbbr` are the backend half of that. `odds_locked`/`market_captured` let the frontend show "no market posted for this game" without it looking like a fetch error. `actual_result` closes the loop on the week view itself, showing whether the model's read actually hit, without waiting on Huginn's separate offline grading pipeline.
+- The events-list bug is the kind of thing that's invisible from any single task's diff or brief — it only surfaces when actually resolving a matchup for a game that's already been played, which is exactly the case `opponentAbbr` exists to support. Worth flagging in case a future change to the free events-list assumption reintroduces it.
+
+
 ## 2026-09-26
 
 **What changed**
