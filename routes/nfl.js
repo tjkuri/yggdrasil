@@ -62,6 +62,18 @@ function findNextEventForTeam(events, fullTeamName) {
   return next?.e || null;
 }
 
+/** Resolve the event for a SPECIFIC matchup (past, live, or future) — unlike
+ * findNextEventForTeam, this doesn't filter by time, since the caller already knows
+ * exactly which game it means (from /api/nfl/week). */
+function findEventForMatchup(events, ownTeamFull, opponentAbbr) {
+  const oppFull = TEAM_BY_ABBR[opponentAbbr];
+  if (!oppFull) return null;
+  return events.find(e =>
+    (e.home_team === ownTeamFull && e.away_team === oppFull) ||
+    (e.away_team === ownTeamFull && e.home_team === oppFull)
+  ) || null;
+}
+
 /**
  * Fetch odds for an event with inflight de-duplication; stores result in cache.
  * Costs 1 API credit on a miss or explicit refresh.
@@ -351,7 +363,10 @@ router.get("/qb/analysis", async (req, res) => {
 
     // --- Odds (manual-refresh policy) ---
     const { data: events } = await getEventsCached();
-    const event = findNextEventForTeam(events, teamFull);
+    const opponentAbbrParam = req.query.opponentAbbr || null;
+    const event = opponentAbbrParam
+      ? findEventForMatchup(events, teamFull, opponentAbbrParam)
+      : findNextEventForTeam(events, teamFull);
 
     let oddsPayload;
     if (!event) {
