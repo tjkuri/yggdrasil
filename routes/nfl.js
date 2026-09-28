@@ -505,6 +505,27 @@ router.get("/qb/analysis", async (req, res) => {
       ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, booksForVerdict, NFL_CFG),
     };
 
+    // --- Actual result (only when this specific game has finished) ---
+    // Takes espnEventId directly from the caller (MatchupDetail already has it from
+    // /api/nfl/week) rather than re-deriving the game via team-abbr matching — the
+    // frontend already resolved exactly which game this is, so trust that.
+    let actualResult = null;
+    const espnEventIdParam = req.query.espnEventId || null;
+    if (espnEventIdParam && lineForAnalysis != null && verdict.lean) {
+      const scoreboard = await espnNflApi.fetchWeekScoreboard(); // cached, cheap
+      const espnGame = scoreboard.find(g => g.id === espnEventIdParam && g.state === "post");
+      if (espnGame) {
+        const summary = await espnNflApi.fetchGameSummary(espnGame.id);
+        const passingRow = summary.passing.find(p => isSamePlayer(p.name, player.name));
+        if (passingRow && typeof passingRow.yards === "number") {
+          const lean = verdict.lean.toLowerCase();
+          const wentOver = passingRow.yards > lineForAnalysis;
+          const outcome = (lean === "over") === wentOver ? "hit" : "miss";
+          actualResult = { yards: passingRow.yards, outcome };
+        }
+      }
+    }
+
     // --- Log prediction snapshot (fire-and-forget, write-once by season+week+player) ---
     if (opponentAbbr && event) {
       const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
@@ -533,6 +554,7 @@ router.get("/qb/analysis", async (req, res) => {
       market_basis: marketBasis,
       matchup,
       verdict,
+      actual_result: actualResult,
       distributions: { attempts_threshold: minAttempts, scopes },
       as_of: new Date().toISOString(),
     });
