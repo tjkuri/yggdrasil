@@ -74,7 +74,15 @@ function rememberOddsEvent(event) {
   cache.set(matchupCacheKey(event.home_team, event.away_team), event);
 }
 function recallOddsEvent(teamAFull, teamBFull) {
-  return cache.get(matchupCacheKey(teamAFull, teamBFull)); // no ttl arg -> never expires
+  const remembered = cache.get(matchupCacheKey(teamAFull, teamBFull)); // no ttl arg -> never expires
+  if (!remembered) return null;
+  // Refuse a remembered event that's actually in the future — happens when the same two teams
+  // play twice in a season (division rivals) and the later meeting overwrote the earlier one's
+  // memory. The live list is always tried first, so recall is only reached when it has no
+  // match — unusual for a genuinely upcoming game, but the norm for an already-Final one. Bias
+  // recall toward "the game that already happened."
+  if (Date.parse(remembered.commence_time) > Date.now()) return null;
+  return remembered;
 }
 
 /** Resolve the event for a SPECIFIC matchup (past, live, or future) — unlike
@@ -388,7 +396,8 @@ router.get("/qb/analysis", async (req, res) => {
       ? findEventForMatchup(events, teamFull, opponentAbbrParam)
       : findNextEventForTeam(events, teamFull);
 
-    const isPastKickoff = !!(event && Date.parse(event.commence_time) < Date.now());
+    const commenceMs = event ? Date.parse(event.commence_time) : NaN;
+    const isPastKickoff = !!(event && (Number.isNaN(commenceMs) || commenceMs < Date.now()));
     const effectiveWantsRefresh = wantsRefresh && !isPastKickoff; // never allow refresh after kickoff
 
     let oddsPayload;
