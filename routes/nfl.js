@@ -10,6 +10,7 @@ const nflLogger = require("../services/nflLogger");
 const { listNflEvents, getEventOdds } = require("../services/theOddsApi");
 const TEAM_BY_ABBR = require("../services/nflTeamNames");
 const cache = require("../utils/cache");
+const nflOddsPersistence = require("../services/nflOddsPersistence");
 const { isSamePlayer } = require("../utils/nameMatch");
 const { computeMarketDispersion, computeQbVerdict } = require("../utils/nflMath");
 const NFL_CFG = require("../config/nfl");
@@ -71,7 +72,9 @@ function matchupCacheKey(teamAFull, teamBFull) {
 }
 function rememberOddsEvent(event) {
   if (!event) return;
-  cache.set(matchupCacheKey(event.home_team, event.away_team), event);
+  const key = matchupCacheKey(event.home_team, event.away_team);
+  cache.set(key, event);
+  nflOddsPersistence.persist(key, event);
 }
 function recallOddsEvent(teamAFull, teamBFull) {
   const remembered = cache.get(matchupCacheKey(teamAFull, teamBFull)); // no ttl arg -> never expires
@@ -84,6 +87,10 @@ function recallOddsEvent(teamAFull, teamBFull) {
   if (Date.parse(remembered.commence_time) > Date.now()) return null;
   return remembered;
 }
+
+// Repopulate the in-memory cache from disk once at startup so the matchup-event
+// memory and captured odds blobs survive a server restart (see services/nflOddsPersistence.js).
+nflOddsPersistence.hydrate(["odds:nfl:matchup-event:", "odds:nfl:"]);
 
 /** Resolve the event for a SPECIFIC matchup (past, live, or future) — unlike
  * findNextEventForTeam, this doesn't filter by time, since the caller already knows
@@ -118,6 +125,7 @@ async function fetchAndCacheEventOdds(eventId, cacheKey) {
       },
     };
     cache.set(cacheKey, { data, meta }); // no TTL → manual refresh only
+    nflOddsPersistence.persist(cacheKey, { data, meta });
     return { data, meta };
   })();
   inflight.set(cacheKey, p);
@@ -516,7 +524,7 @@ router.get("/qb/analysis", async (req, res) => {
       const espnGame = scoreboard.find(g => g.id === espnEventIdParam && g.state === "post");
       if (espnGame) {
         const summary = await espnNflApi.fetchGameSummary(espnGame.id);
-        const passingRow = summary.passing.find(p => isSamePlayer(p.name, player.name));
+        const passingRow = summary.passing.find(p => isSamePlayer(p.name, player.name) && p.team_abbr === player.team_abbr);
         if (passingRow && typeof passingRow.yards === "number") {
           const lean = verdict.lean.toLowerCase();
           const wentOver = passingRow.yards > lineForAnalysis;
@@ -527,7 +535,7 @@ router.get("/qb/analysis", async (req, res) => {
     }
 
     // --- Log prediction snapshot (fire-and-forget, write-once by season+week+player) ---
-    if (opponentAbbr && event) {
+    if (opponentAbbr && event && !isPastKickoff) {
       const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
       const awayAbbr = TEAM_NAME_TO_ABBR[event.away_team];
       nflSchedule.getWeekForMatchup({ homeAbbr, awayAbbr, commenceTime: event.commence_time })
