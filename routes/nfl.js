@@ -70,6 +70,13 @@ function findNextEventForTeam(events, fullTeamName) {
 function matchupCacheKey(teamAFull, teamBFull) {
   return `odds:nfl:matchup-event:${[teamAFull, teamBFull].sort().join("|")}`;
 }
+
+/** Cache key for one event's captured passing-yards odds blob. Keyed per EVENT, not per
+ * player — a single fetch covers every QB in the game, which is why the batch warm-up in
+ * /week/refresh-odds costs one credit per game rather than one per QB. */
+function oddsCacheKey(eventId) {
+  return `odds:nfl:${eventId}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
+}
 function rememberOddsEvent(event) {
   if (!event) return;
   const key = matchupCacheKey(event.home_team, event.away_team);
@@ -244,7 +251,7 @@ router.get("/week", async (req, res) => {
           : null;
         if (oddsEvent) {
           rememberOddsEvent(oddsEvent); // populate matchup memory before this game can go Final and drop off the free events list
-          const key = `odds:nfl:${oddsEvent.id}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
+          const key = oddsCacheKey(oddsEvent.id);
           const cached = cache.get(key); // no TTL → never expires, matches existing odds-cache convention
           if (cached) {
             const books = extractPlayerBooks(cached.data, match.name);
@@ -278,6 +285,80 @@ router.get("/week", async (req, res) => {
 });
 
 /**
+ * POST /api/nfl/week/refresh-odds
+ * Batch odds warm-up for the whole week: captures the passing-yards market for every game
+ * that doesn't already have one cached. Unlike /week (which never spends credits), this is
+ * the one deliberately paid NFL endpoint — 1 credit per game actually fetched.
+ *
+ * Deliberately cheap to re-run: a game whose market is already cached is skipped, so a second
+ * click costs nothing. Games already past kickoff are skipped too (their market is closed —
+ * same rule /qb/analysis's isPastKickoff lock enforces).
+ *
+ * Needs no starter resolution at all: the odds cache is keyed per EVENT (see oddsCacheKey),
+ * so one fetch covers both QBs in a game. Per-QB "is there actually a DK number for him"
+ * stays /week's job, which the frontend re-fetches once this finishes.
+ */
+router.post("/week/refresh-odds", async (req, res) => {
+  try {
+    const year = new Date().getFullYear();
+    const [{ data: events }, scoreboard] = await Promise.all([
+      getEventsCached(),
+      espnNflApi.fetchWeekScoreboard(),
+    ]);
+
+    const details = [];
+    const tally = { captured: 0, already_had_market: 0, skipped_started: 0, no_event: 0, failed: 0 };
+
+    // Sequential on purpose: these are paid upstream calls, and serializing keeps one click
+    // from firing ~16 concurrent requests at an external API.
+    for (const g of scoreboard) {
+      const matchup = `${g.away?.abbr || "?"}@${g.home?.abbr || "?"}`;
+      const homeFull = g.home?.abbr ? TEAM_BY_ABBR[g.home.abbr] : null;
+      const event = homeFull && g.away?.abbr
+        ? findEventForMatchup(events, homeFull, g.away.abbr)
+        : null;
+
+      if (!event) {
+        tally.no_event++;
+        details.push({ matchup, status: "no_event" });
+        continue;
+      }
+
+      // Cache check precedes the kickoff check on purpose: an already-captured game that has
+      // since started is "already_had_market" (we have its pre-game line), not "skipped".
+      const key = oddsCacheKey(event.id);
+      if (cache.get(key)) {
+        tally.already_had_market++;
+        details.push({ matchup, status: "already_had_market" });
+        continue;
+      }
+
+      const commenceMs = Date.parse(event.commence_time);
+      if (Number.isNaN(commenceMs) || commenceMs < Date.now()) {
+        tally.skipped_started++;
+        details.push({ matchup, status: "skipped_started" });
+        continue;
+      }
+
+      try {
+        await fetchAndCacheEventOdds(event.id, key);
+        tally.captured++;
+        details.push({ matchup, status: "captured" });
+      } catch (err) {
+        // One upstream failure shouldn't abandon the rest of the slate.
+        tally.failed++;
+        details.push({ matchup, status: "failed", detail: err?.message || "fetch failed" });
+      }
+    }
+
+    res.json({ season: year, games_total: scoreboard.length, ...tally, details });
+  } catch (err) {
+    console.error("nfl/week/refresh-odds error:", err?.response?.data || err.message);
+    res.status(500).json({ error: "Failed to refresh week odds", detail: err.message });
+  }
+});
+
+/**
  * GET /api/nfl/qb/line?playerId=...&refresh=true
  * Returns the passing yards market odds for a single QB.
  */
@@ -302,7 +383,7 @@ router.get("/qb/line", async (req, res) => {
       });
     }
 
-    const ODDS_CACHE_KEY = `odds:nfl:${event.id}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
+    const ODDS_CACHE_KEY = oddsCacheKey(event.id);
     const cached = cache.get(ODDS_CACHE_KEY); // no TTL → manual-refresh only
     const wantsRefresh = String(refresh).toLowerCase() === "true";
 
@@ -417,7 +498,7 @@ router.get("/qb/analysis", async (req, res) => {
         credits: null, no_upcoming_game: true, market_captured: false,
       };
     } else {
-      const ODDS_CACHE_KEY = `odds:nfl:${event.id}:${NFL_PASS_YDS_MARKET}:${NFL_PASS_YDS_REGION}`;
+      const ODDS_CACHE_KEY = oddsCacheKey(event.id);
       const cached = cache.get(ODDS_CACHE_KEY);
 
       if (isPastKickoff && !cached) {

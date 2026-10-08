@@ -2,6 +2,20 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-10-07
+
+**What changed**
+- New `POST /api/nfl/week/refresh-odds` (`routes/nfl.js`): batch odds warm-up for the whole week. Walks this week's scoreboard, resolves each game's odds event, and captures the passing-yards market for every game that doesn't already have one cached. Returns a tally (`captured` / `already_had_market` / `skipped_started` / `no_event` / `failed`) plus a per-game `details` array.
+- Extracted `oddsCacheKey(eventId)` next to `matchupCacheKey` and replaced the three places that were building that same key inline.
+
+**Why**
+- The whole-slate warm-up was already happening every week, just manually: a throwaway script looping over each game and hitting `/qb/analysis?refreshOdds=true`. That's a standing need, not a one-off, so it belongs in the app.
+- **Per-event, not per-QB, and it needs no starter resolution.** The odds cache key covers every passer in a game, so one fetch serves both QBs — a 16-game slate costs ~16 credits, not ~32. That also means this route can skip depth-chart lookups entirely (~32 ESPN calls per click avoided); whether DraftKings actually lists a *specific* QB stays `/week`'s job, which the frontend re-fetches once this returns. The first draft of this design did resolve starters here before I noticed the cache key made it unnecessary.
+- **Skipping already-cached games is the point, not an optimization.** It makes the button safe to click repeatedly — verified live: first call `captured: 15`, immediate second call `captured: 0, already_had_market: 15`, zero credits spent. The cache check runs *before* the kickoff check on purpose, so an already-captured game that has since started reports `already_had_market` (we hold its pre-game line) rather than the misleading `skipped_started`.
+- **POST, not GET** — every other route here is a GET, including ones that spend credits (`/qb/analysis?refreshOdds=true`). Broke the convention deliberately: this is the one endpoint whose entire purpose is spending money, and once this is deployed behind a plain link, a GET is reachable by a crawler or browser prefetch. Confirmed the existing CORS middleware already allows POST and that Express answers the preflight correctly.
+- Sequential rather than parallel, so one click can't fire ~16 concurrent requests at an external API; a single game's failure is tallied and skipped instead of abandoning the rest of the slate.
+- Incidentally confirmed the disk-persistence shim added days earlier is doing its job: restarting the server mid-work re-hydrated 15 captured odds blobs and 32 matchup-event entries from `cache/nfl-odds-events.json` with no refetch.
+
 ## 2026-09-27
 
 **What changed**

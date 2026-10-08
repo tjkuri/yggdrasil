@@ -88,6 +88,12 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 
 **`GET /api/nfl/week`** — this week's full schedule via `espnNflApi.fetchWeekScoreboard()`. For each side, resolves the starting QB from ESPN's own depth chart (`fetchDepthChart`, first athlete listed) matched back to the roster via `isSamePlayer`, and reports `qb.market_posted` by checking — never seeding — the existing odds cache for any cached DraftKings line (point value present, regardless of whether both sides are quoted — a one-sided line still counts; a cache miss just means `false`, never a paid fetch). Also calls `rememberOddsEvent` for every event where it successfully resolves a side's starting QB *and* finds a matching live odds event for that team, proactively populating the matchup memory described above.
 
+**`POST /api/nfl/week/refresh-odds`** — the batch counterpart to `/week`, and the only NFL route that deliberately spends credits without a per-QB request. Walks this week's scoreboard, resolves each game's odds event via the same `findEventForMatchup` path, and fetches the market only when it isn't already cached. Design notes that matter:
+- **Per-event, not per-QB.** The odds cache key (`oddsCacheKey(eventId)`) covers every passer in the game, so a 16-game slate costs ~16 credits, not ~32. This route needs no depth-chart/starter resolution at all — per-QB "does DraftKings actually list him" stays `/week`'s job, which the frontend re-fetches once this returns.
+- **Cheap to re-run.** An already-cached game is skipped, so a second click costs nothing. The cache check deliberately precedes the kickoff check, so an already-captured game that has since started reports `already_had_market` (we hold its pre-game line) rather than `skipped_started`.
+- **Sequential, not parallel** — serializes paid upstream calls so one click can't fire ~16 concurrent requests at The Odds API. A single game's failure is tallied and skipped rather than abandoning the rest of the slate.
+- **POST, not GET**, unlike every other route here: it spends money, and once this is deployed behind a plain link a GET would be reachable by a crawler or browser prefetch.
+
 **Opponent adjustment (`nflDefense.js`)** — two raw ratios per team, each shrunk toward 1.0, combined into `matchup_factor`:
 - `shrink(raw, n, k) = (n·raw + k·1.0) / (n + k)` — pulls a factor toward league-average (1.0) when its weighted sample `n` is thin, controlled by `SHRINK_K_PASS`/`SHRINK_K_RUSH`.
 - `pass_ypa_factor = shrink(teamYPA / leagueYPA, n_pass, SHRINK_K_PASS)`, where `teamYPA = pass yds allowed / attempts faced`. Efficiency, not raw yards allowed — the DVOA-style approach — so a defense that faces heavy volume isn't mistaken for a bad pass defense.
@@ -123,6 +129,7 @@ ODDS_REFRESH_MODE # "manual" = never auto-refresh paid odds
 | GET | `/api/nfl/health` | Health check |
 | GET | `/api/nfl/qbs` | NFL QB roster list (supports `season`, `active`, `startersOnly`, `limit`) |
 | GET | `/api/nfl/week` | This week's schedule with each side's resolved starting QB and DK market-posted flag; never triggers a paid odds fetch |
+| POST | `/api/nfl/week/refresh-odds` | Batch odds warm-up for the whole week — **the one deliberately paid NFL endpoint** (1 credit per game actually fetched); skips games already cached or past kickoff |
 | GET | `/api/nfl/qb/line` | Passing yards market odds for one QB (`playerId`, `refresh`) |
 | GET | `/api/nfl/qb/passing-yards` | Historical passing yards distributions (`playerId`, `line`, `minAttempts`) |
 | GET | `/api/nfl/qb/analysis` | Combined odds + opponent-adjusted distributions + one-scope verdict (`playerId`, `refreshOdds`, `minAttempts`, `line`, `opponentAbbr`, `espnEventId`) |
