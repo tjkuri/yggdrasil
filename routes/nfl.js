@@ -186,6 +186,216 @@ async function resolvePlayer(playerId) {
   return { player, year };
 }
 
+/** Resolve one side's starting QB via ESPN's own depth chart (first athlete listed),
+ * matched back to the roster by team + name. Shared by /week and /week/refresh-odds —
+ * do not duplicate this lookup. */
+async function resolveStartingQb(side, allQBs) {
+  if (!side) return null;
+  const chart = await espnNflApi.fetchDepthChart(side.espn_team_id);
+  const starterName = chart[0]?.displayName || null;
+  return starterName
+    ? allQBs.find(p => p.team_abbr === side.abbr && isSamePlayer(p.name, starterName)) || null
+    : null;
+}
+
+/**
+ * Everything GET /qb/analysis does, minus the HTTP plumbing: resolve the event, capture or
+ * reuse its odds, compute opponent-adjusted distributions and a verdict, and build the
+ * exact response /qb/analysis returns.
+ *
+ * Returns { response, logPrediction } rather than performing the prediction-log side effect
+ * itself — logPrediction is a thunk the caller decides whether to fire-and-forget (the
+ * interactive /qb/analysis route, where logging must never add latency to a page load) or
+ * await (the batch /week/refresh-odds route, which wants to know whether each one actually
+ * wrote a new snapshot so it can report an honest count). Calling logPrediction() is a no-op
+ * — resolves false, writes nothing — when there's no resolved event, no opponent, or the
+ * game has already started (the same guard that stops a post-hoc fabricated prediction from
+ * ever being written for a game whose outcome already happened).
+ */
+async function computeQbAnalysis(player, year, opts = {}) {
+  const {
+    opponentAbbrParam = null,
+    lineOverride = null,
+    minAttempts = 10,
+    wantsRefresh = false,
+    espnEventIdParam = null,
+  } = opts;
+
+  const teamFull = TEAM_BY_ABBR[player.team_abbr] || player.team_abbr;
+
+  // --- Odds (manual-refresh policy) ---
+  const { data: events } = await getEventsCached();
+  const event = opponentAbbrParam
+    ? findEventForMatchup(events, teamFull, opponentAbbrParam)
+    : findNextEventForTeam(events, teamFull);
+
+  const commenceMs = event ? Date.parse(event.commence_time) : NaN;
+  const isPastKickoff = !!(event && (Number.isNaN(commenceMs) || commenceMs < Date.now()));
+  const effectiveWantsRefresh = wantsRefresh && !isPastKickoff; // never allow refresh after kickoff
+
+  let oddsPayload;
+  if (!event) {
+    oddsPayload = {
+      market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
+      consensus_line: null, book_count: 0, books: [], as_of: null,
+      cache: { hit: true, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
+      credits: null, no_upcoming_game: true, market_captured: false,
+    };
+  } else {
+    const ODDS_CACHE_KEY = oddsCacheKey(event.id);
+    const cached = cache.get(ODDS_CACHE_KEY);
+
+    if (isPastKickoff && !cached) {
+      // Never seed a fresh paid fetch for a game that's already started — the market's
+      // closed. Distinct from no_upcoming_game: this game IS real, we just never
+      // captured its market before kickoff.
+      oddsPayload = {
+        market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
+        consensus_line: null, book_count: 0, books: [], as_of: null,
+        cache: { hit: false, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
+        credits: null, no_upcoming_game: false, market_captured: false,
+      };
+    } else {
+      let oddsBlob, oddsMeta, cacheHit = false, seeded = false;
+      if (cached && !effectiveWantsRefresh) {
+        ({ data: oddsBlob, meta: oddsMeta } = cached); cacheHit = true;
+      } else if (!cached) {
+        ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY)); seeded = true;
+      } else {
+        ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY));
+      }
+
+      const books = extractPlayerBooks(oddsBlob, player.name);
+      const dispersion = computeMarketDispersion(books);
+
+      oddsPayload = {
+        market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
+        ...dispersion,
+        book_count: books.length,
+        books,
+        as_of: oddsMeta?.fetchedAt || null,
+        cache: {
+          hit: cacheHit, seeded_on_miss: seeded, key: ODDS_CACHE_KEY,
+          age_minutes: oddsMeta?.fetchedAt ? Math.round((Date.now() - Date.parse(oddsMeta.fetchedAt)) / 60000) : null,
+          needs_refresh: false,
+        },
+        credits: oddsMeta?.headers || null,
+        no_upcoming_game: false, market_captured: true,
+      };
+    }
+  }
+
+  // --- Market basis: prefer DraftKings for the line and the edge math, since that's what
+  // this is actually used against; fall back to consensus (never silently) when DK isn't
+  // quoting this player yet. An explicit ?line= override still wins over both.
+  const dkBook = (oddsPayload?.books || []).find(
+    b => b.book === "draftkings" && typeof b.point === "number" && b.price_over != null && b.price_under != null
+  );
+  const marketBasis = dkBook
+    ? { used: "draftkings", requested: "draftkings", fell_back: false }
+    : { used: "consensus", requested: "draftkings", fell_back: (oddsPayload?.books?.length || 0) > 0 };
+  const booksForVerdict = dkBook ? [dkBook] : oddsPayload?.books;
+
+  // --- Distributions ---
+  const lineForAnalysis = lineOverride ?? (dkBook ? dkBook.point : oddsPayload?.consensus_line) ?? null;
+  const current = year, last = year - 1;
+
+  const [currRows, lastRows] = await Promise.all([
+    stats.loadQBPassYardsBySeasons(player, [current]),
+    stats.loadQBPassYardsBySeasons(player, [last]),
+  ]);
+
+  // --- Opponent matchup adjustment ---
+  const opponentAbbr = findOpponentAbbr(event, teamFull);
+  let matchup = null;
+  if (opponentAbbr) {
+    const profiles = await defense.getDefenseProfiles({ current, prior: last });
+    const profile = profiles[opponentAbbr];
+    if (profile) {
+      matchup = {
+        opponent_abbr: opponentAbbr,
+        opponent_name: TEAM_BY_ABBR[opponentAbbr] || opponentAbbr,
+        ...profile,
+      };
+    }
+  }
+
+  const scopes = await stats.buildScopedDistributions(
+    player, { currRows, lastRows },
+    { current, last, minAttempts, line: lineForAnalysis, matchupFactor: matchup?.matchup_factor ?? 1.0 }
+  );
+
+  // --- Verdict: one recommendation, from whichever scope has the best usable sample ---
+  // Same fallback order the frontend already uses to pick a default scope tab (last season
+  // is a full, stable sample; career risks diluting with very old/irrelevant seasons; current
+  // season is last resort since early on it's 1-3 games).
+  const verdictScopeName =
+    (scopes.last_season?.n || 0) > 0 ? "last_season" :
+    (scopes.career?.n || 0) > 0 ? "career" :
+    "current_season";
+  const verdict = {
+    scope_used: verdictScopeName,
+    ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, booksForVerdict, NFL_CFG),
+  };
+
+  // --- Actual result (only when this specific game has finished) ---
+  // Takes espnEventId directly from the caller (MatchupDetail already has it from
+  // /api/nfl/week) rather than re-deriving the game via team-abbr matching — the
+  // frontend already resolved exactly which game this is, so trust that.
+  let actualResult = null;
+  if (espnEventIdParam && lineForAnalysis != null && verdict.lean) {
+    const scoreboard = await espnNflApi.fetchWeekScoreboard(); // cached, cheap
+    const espnGame = scoreboard.find(g => g.id === espnEventIdParam && g.state === "post");
+    if (espnGame) {
+      const summary = await espnNflApi.fetchGameSummary(espnGame.id);
+      const passingRow = summary.passing.find(p => isSamePlayer(p.name, player.name) && p.team_abbr === player.team_abbr);
+      if (passingRow && typeof passingRow.yards === "number") {
+        const lean = verdict.lean.toLowerCase();
+        const wentOver = passingRow.yards > lineForAnalysis;
+        const outcome = (lean === "over") === wentOver ? "hit" : "miss";
+        actualResult = { yards: passingRow.yards, outcome };
+      }
+    }
+  }
+
+  // --- Prediction snapshot thunk (write-once by season+week+player) — caller decides
+  // whether to fire-and-forget or await it. No-ops (resolves false) when there's no
+  // opponent/event, or the game has already started.
+  let logPrediction = async () => false;
+  if (opponentAbbr && event && !isPastKickoff) {
+    logPrediction = async () => {
+      const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
+      const awayAbbr = TEAM_NAME_TO_ABBR[event.away_team];
+      const result = await nflSchedule.getWeekForMatchup({ homeAbbr, awayAbbr, commenceTime: event.commence_time });
+      if (!result) {
+        console.warn("[nflLogger] skipped: no schedule match for", { homeAbbr, awayAbbr, commenceTime: event.commence_time });
+        return false;
+      }
+      return nflLogger.logPredictionIfNew({
+        season: result.season, week: result.week, player, opponentAbbr,
+        line: lineForAnalysis, scopeUsed: verdictScopeName, verdict,
+        adjustedMean: scopes[verdictScopeName]?.mean ?? null,
+      });
+    };
+  }
+
+  const response = {
+    player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
+    event: event ? { id: event.id, home_team: event.home_team, away_team: event.away_team, commence_time: event.commence_time } : null,
+    odds: oddsPayload,
+    odds_locked: isPastKickoff,
+    line: lineForAnalysis,
+    market_basis: marketBasis,
+    matchup,
+    verdict,
+    actual_result: actualResult,
+    distributions: { attempts_threshold: minAttempts, scopes },
+    as_of: new Date().toISOString(),
+  };
+
+  return { response, logPrediction };
+}
+
 // ---- Routes ----
 
 router.get("/health", (_req, res) => res.json({ ok: true }));
@@ -237,11 +447,7 @@ router.get("/week", async (req, res) => {
 
     async function resolveSide(side) {
       if (!side) return null;
-      const chart = await espnNflApi.fetchDepthChart(side.espn_team_id);
-      const starterName = chart[0]?.displayName || null;
-      const match = starterName
-        ? allQBs.find(p => p.team_abbr === side.abbr && isSamePlayer(p.name, starterName))
-        : null;
+      const match = await resolveStartingQb(side, allQBs);
 
       let marketPosted = false;
       if (match) {
@@ -287,30 +493,45 @@ router.get("/week", async (req, res) => {
 /**
  * POST /api/nfl/week/refresh-odds
  * Batch odds warm-up for the whole week: captures the passing-yards market for every game
- * that doesn't already have one cached. Unlike /week (which never spends credits), this is
- * the one deliberately paid NFL endpoint — 1 credit per game actually fetched.
+ * that doesn't already have one cached, AND — this is the actual point of the button, not a
+ * side effect — logs a prediction snapshot for every starting QB, exactly as if each matchup
+ * had been opened by hand. A batch action that warmed odds nobody ever looked at would log
+ * nothing and defeat the reason this log exists at all. Unlike /week (which never spends
+ * credits), this is the one deliberately paid NFL endpoint — 1 credit per game actually
+ * fetched, same either way whether that fetch happens here or from opening a matchup.
  *
- * Deliberately cheap to re-run: a game whose market is already cached is skipped, so a second
- * click costs nothing. Games already past kickoff are skipped too (their market is closed —
- * same rule /qb/analysis's isPastKickoff lock enforces).
+ * Deliberately cheap to re-run: a game whose market is already cached costs no credit, and
+ * logPredictionIfNew is write-once per (season, week, player) — a second click captures and
+ * logs nothing new. Games already past kickoff are skipped entirely (their market is closed,
+ * and the same guard that stops /qb/analysis from ever logging a post-hoc prediction for an
+ * already-started game applies here too).
  *
- * Needs no starter resolution at all: the odds cache is keyed per EVENT (see oddsCacheKey),
- * so one fetch covers both QBs in a game. Per-QB "is there actually a DK number for him"
- * stays /week's job, which the frontend re-fetches once this finishes.
+ * Two separate loops over the same games, not one: the odds-capture step stays per EVENT
+ * (one fetch covers both QBs, unchanged from the original version of this route) so its tally
+ * reflects games, not QB calls; the prediction step runs per STARTER (now needs the same
+ * depth-chart resolution /week does) through computeQbAnalysis, the exact function
+ * /qb/analysis itself calls — so a game's odds capture and its prediction logging can't drift
+ * out of sync with what a manual visit would have produced.
  */
 router.post("/week/refresh-odds", async (req, res) => {
   try {
     const year = new Date().getFullYear();
-    const [{ data: events }, scoreboard] = await Promise.all([
+    const [{ players: allQBs }, { data: events }, scoreboard] = await Promise.all([
+      roster.getQBs(year),
       getEventsCached(),
       espnNflApi.fetchWeekScoreboard(),
     ]);
 
     const details = [];
-    const tally = { captured: 0, already_had_market: 0, skipped_started: 0, no_event: 0, failed: 0 };
+    const predictionDetails = [];
+    const tally = {
+      captured: 0, already_had_market: 0, skipped_started: 0, no_event: 0, failed: 0,
+      predictions_logged: 0, predictions_already_logged: 0, predictions_skipped: 0, predictions_failed: 0,
+    };
 
-    // Sequential on purpose: these are paid upstream calls, and serializing keeps one click
-    // from firing ~16 concurrent requests at an external API.
+    // Sequential on purpose: these are paid upstream calls (and each starter's analysis is a
+    // real round trip through stats/defense data), and serializing keeps one click from firing
+    // dozens of concurrent requests at external APIs.
     for (const g of scoreboard) {
       const matchup = `${g.away?.abbr || "?"}@${g.home?.abbr || "?"}`;
       const homeFull = g.home?.abbr ? TEAM_BY_ABBR[g.home.abbr] : null;
@@ -321,37 +542,73 @@ router.post("/week/refresh-odds", async (req, res) => {
       if (!event) {
         tally.no_event++;
         details.push({ matchup, status: "no_event" });
-        continue;
+        continue; // no opponent resolved — nothing to capture or log for this game
       }
 
       // Cache check precedes the kickoff check on purpose: an already-captured game that has
       // since started is "already_had_market" (we have its pre-game line), not "skipped".
       const key = oddsCacheKey(event.id);
-      if (cache.get(key)) {
+      const alreadyCached = !!cache.get(key);
+      let gameStarted = false;
+
+      if (alreadyCached) {
         tally.already_had_market++;
         details.push({ matchup, status: "already_had_market" });
-        continue;
+      } else {
+        const commenceMs = Date.parse(event.commence_time);
+        gameStarted = Number.isNaN(commenceMs) || commenceMs < Date.now();
+        if (gameStarted) {
+          tally.skipped_started++;
+          details.push({ matchup, status: "skipped_started" });
+        } else {
+          try {
+            await fetchAndCacheEventOdds(event.id, key);
+            tally.captured++;
+            details.push({ matchup, status: "captured" });
+          } catch (err) {
+            // One upstream failure shouldn't abandon the rest of the slate.
+            tally.failed++;
+            details.push({ matchup, status: "failed", detail: err?.message || "fetch failed" });
+          }
+        }
       }
 
-      const commenceMs = Date.parse(event.commence_time);
-      if (Number.isNaN(commenceMs) || commenceMs < Date.now()) {
-        tally.skipped_started++;
-        details.push({ matchup, status: "skipped_started" });
-        continue;
-      }
+      // Prediction logging, per starter — the whole reason this route exists. Skip only when
+      // the game has actually started (g.state, ESPN's own read — a cheap pre-check;
+      // computeQbAnalysis's own isPastKickoff/event guard inside logPrediction is still the
+      // authoritative one, this just avoids wasted computation for a live/Final game).
+      if (g.state !== "pre") continue;
 
-      try {
-        await fetchAndCacheEventOdds(event.id, key);
-        tally.captured++;
-        details.push({ matchup, status: "captured" });
-      } catch (err) {
-        // One upstream failure shouldn't abandon the rest of the slate.
-        tally.failed++;
-        details.push({ matchup, status: "failed", detail: err?.message || "fetch failed" });
+      for (const sideKey of ["home", "away"]) {
+        const side = g[sideKey];
+        const oppSide = g[sideKey === "home" ? "away" : "home"];
+        if (!side || !oppSide) continue;
+
+        const player = await resolveStartingQb(side, allQBs);
+        if (!player) {
+          tally.predictions_skipped++;
+          predictionDetails.push({ matchup, side: sideKey, status: "no_starter_resolved" });
+          continue;
+        }
+
+        try {
+          const { logPrediction } = await computeQbAnalysis(player, year, { opponentAbbrParam: oppSide.abbr });
+          const logged = await logPrediction();
+          if (logged) {
+            tally.predictions_logged++;
+            predictionDetails.push({ matchup, side: sideKey, player: player.name, status: "logged" });
+          } else {
+            tally.predictions_already_logged++;
+            predictionDetails.push({ matchup, side: sideKey, player: player.name, status: "already_logged" });
+          }
+        } catch (err) {
+          tally.predictions_failed++;
+          predictionDetails.push({ matchup, side: sideKey, player: player.name, status: "failed", detail: err?.message || "analysis failed" });
+        }
       }
     }
 
-    res.json({ season: year, games_total: scoreboard.length, ...tally, details });
+    res.json({ season: year, games_total: scoreboard.length, ...tally, details, prediction_details: predictionDetails });
   } catch (err) {
     console.error("nfl/week/refresh-odds error:", err?.response?.data || err.message);
     res.status(500).json({ error: "Failed to refresh week odds", detail: err.message });
@@ -469,184 +726,21 @@ router.get("/qb/analysis", async (req, res) => {
     const { playerId } = req.query;
     if (!playerId) return res.status(400).json({ error: "playerId is required" });
 
-    const wantsRefresh = String(req.query.refreshOdds).toLowerCase() === "true";
-    const minAttempts = req.query.minAttempts != null ? Number(req.query.minAttempts) : 10;
-    const lineOverride = req.query.line != null ? Number(req.query.line) : null;
-
     const { player, year } = await resolvePlayer(playerId);
     if (!player) return res.status(404).json({ error: "Player not found in roster", year });
 
-    const teamFull = TEAM_BY_ABBR[player.team_abbr] || player.team_abbr;
-
-    // --- Odds (manual-refresh policy) ---
-    const { data: events } = await getEventsCached();
-    const opponentAbbrParam = req.query.opponentAbbr || null;
-    const event = opponentAbbrParam
-      ? findEventForMatchup(events, teamFull, opponentAbbrParam)
-      : findNextEventForTeam(events, teamFull);
-
-    const commenceMs = event ? Date.parse(event.commence_time) : NaN;
-    const isPastKickoff = !!(event && (Number.isNaN(commenceMs) || commenceMs < Date.now()));
-    const effectiveWantsRefresh = wantsRefresh && !isPastKickoff; // never allow refresh after kickoff
-
-    let oddsPayload;
-    if (!event) {
-      oddsPayload = {
-        market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
-        consensus_line: null, book_count: 0, books: [], as_of: null,
-        cache: { hit: true, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
-        credits: null, no_upcoming_game: true, market_captured: false,
-      };
-    } else {
-      const ODDS_CACHE_KEY = oddsCacheKey(event.id);
-      const cached = cache.get(ODDS_CACHE_KEY);
-
-      if (isPastKickoff && !cached) {
-        // Never seed a fresh paid fetch for a game that's already started — the market's
-        // closed. Distinct from no_upcoming_game: this game IS real, we just never
-        // captured its market before kickoff.
-        oddsPayload = {
-          market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
-          consensus_line: null, book_count: 0, books: [], as_of: null,
-          cache: { hit: false, seeded_on_miss: false, age_minutes: null, needs_refresh: false },
-          credits: null, no_upcoming_game: false, market_captured: false,
-        };
-      } else {
-        let oddsBlob, oddsMeta, cacheHit = false, seeded = false;
-        if (cached && !effectiveWantsRefresh) {
-          ({ data: oddsBlob, meta: oddsMeta } = cached); cacheHit = true;
-        } else if (!cached) {
-          ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY)); seeded = true;
-        } else {
-          ({ data: oddsBlob, meta: oddsMeta } = await fetchAndCacheEventOdds(event.id, ODDS_CACHE_KEY));
-        }
-
-        const books = extractPlayerBooks(oddsBlob, player.name);
-        const dispersion = computeMarketDispersion(books);
-
-        oddsPayload = {
-          market: NFL_PASS_YDS_MARKET, region: NFL_PASS_YDS_REGION,
-          ...dispersion,
-          book_count: books.length,
-          books,
-          as_of: oddsMeta?.fetchedAt || null,
-          cache: {
-            hit: cacheHit, seeded_on_miss: seeded, key: ODDS_CACHE_KEY,
-            age_minutes: oddsMeta?.fetchedAt ? Math.round((Date.now() - Date.parse(oddsMeta.fetchedAt)) / 60000) : null,
-            needs_refresh: false,
-          },
-          credits: oddsMeta?.headers || null,
-          no_upcoming_game: false, market_captured: true,
-        };
-      }
-    }
-
-    // --- Market basis: prefer DraftKings for the line and the edge math, since that's what
-    // this is actually used against; fall back to consensus (never silently) when DK isn't
-    // quoting this player yet. An explicit ?line= override still wins over both.
-    const dkBook = (oddsPayload?.books || []).find(
-      b => b.book === "draftkings" && typeof b.point === "number" && b.price_over != null && b.price_under != null
-    );
-    const marketBasis = dkBook
-      ? { used: "draftkings", requested: "draftkings", fell_back: false }
-      : { used: "consensus", requested: "draftkings", fell_back: (oddsPayload?.books?.length || 0) > 0 };
-    const booksForVerdict = dkBook ? [dkBook] : oddsPayload?.books;
-
-    // --- Distributions ---
-    const lineForAnalysis = lineOverride ?? (dkBook ? dkBook.point : oddsPayload?.consensus_line) ?? null;
-    const current = year, last = year - 1;
-
-    const [currRows, lastRows] = await Promise.all([
-      stats.loadQBPassYardsBySeasons(player, [current]),
-      stats.loadQBPassYardsBySeasons(player, [last]),
-    ]);
-
-    // --- Opponent matchup adjustment ---
-    const opponentAbbr = findOpponentAbbr(event, teamFull);
-    let matchup = null;
-    if (opponentAbbr) {
-      const profiles = await defense.getDefenseProfiles({ current, prior: last });
-      const profile = profiles[opponentAbbr];
-      if (profile) {
-        matchup = {
-          opponent_abbr: opponentAbbr,
-          opponent_name: TEAM_BY_ABBR[opponentAbbr] || opponentAbbr,
-          ...profile,
-        };
-      }
-    }
-
-    const scopes = await stats.buildScopedDistributions(
-      player, { currRows, lastRows },
-      { current, last, minAttempts, line: lineForAnalysis, matchupFactor: matchup?.matchup_factor ?? 1.0 }
-    );
-
-    // --- Verdict: one recommendation, from whichever scope has the best usable sample ---
-    // Same fallback order the frontend already uses to pick a default scope tab (last season
-    // is a full, stable sample; career risks diluting with very old/irrelevant seasons; current
-    // season is last resort since early on it's 1-3 games).
-    const verdictScopeName =
-      (scopes.last_season?.n || 0) > 0 ? "last_season" :
-      (scopes.career?.n || 0) > 0 ? "career" :
-      "current_season";
-    const verdict = {
-      scope_used: verdictScopeName,
-      ...computeQbVerdict(scopes[verdictScopeName], lineForAnalysis, booksForVerdict, NFL_CFG),
-    };
-
-    // --- Actual result (only when this specific game has finished) ---
-    // Takes espnEventId directly from the caller (MatchupDetail already has it from
-    // /api/nfl/week) rather than re-deriving the game via team-abbr matching — the
-    // frontend already resolved exactly which game this is, so trust that.
-    let actualResult = null;
-    const espnEventIdParam = req.query.espnEventId || null;
-    if (espnEventIdParam && lineForAnalysis != null && verdict.lean) {
-      const scoreboard = await espnNflApi.fetchWeekScoreboard(); // cached, cheap
-      const espnGame = scoreboard.find(g => g.id === espnEventIdParam && g.state === "post");
-      if (espnGame) {
-        const summary = await espnNflApi.fetchGameSummary(espnGame.id);
-        const passingRow = summary.passing.find(p => isSamePlayer(p.name, player.name) && p.team_abbr === player.team_abbr);
-        if (passingRow && typeof passingRow.yards === "number") {
-          const lean = verdict.lean.toLowerCase();
-          const wentOver = passingRow.yards > lineForAnalysis;
-          const outcome = (lean === "over") === wentOver ? "hit" : "miss";
-          actualResult = { yards: passingRow.yards, outcome };
-        }
-      }
-    }
-
-    // --- Log prediction snapshot (fire-and-forget, write-once by season+week+player) ---
-    if (opponentAbbr && event && !isPastKickoff) {
-      const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
-      const awayAbbr = TEAM_NAME_TO_ABBR[event.away_team];
-      nflSchedule.getWeekForMatchup({ homeAbbr, awayAbbr, commenceTime: event.commence_time })
-        .then(result => {
-          if (!result) {
-            console.warn("[nflLogger] skipped: no schedule match for", { homeAbbr, awayAbbr, commenceTime: event.commence_time });
-            return;
-          }
-          return nflLogger.logPredictionIfNew({
-            season: result.season, week: result.week, player, opponentAbbr,
-            line: lineForAnalysis, scopeUsed: verdictScopeName, verdict,
-            adjustedMean: scopes[verdictScopeName]?.mean ?? null,
-          });
-        })
-        .catch(err => console.error("[nflLogger] failed:", err?.message || err));
-    }
-
-    return res.json({
-      player: { id: player.id, name: player.name, team_abbr: player.team_abbr, team_name: teamFull },
-      event: event ? { id: event.id, home_team: event.home_team, away_team: event.away_team, commence_time: event.commence_time } : null,
-      odds: oddsPayload,
-      odds_locked: isPastKickoff,
-      line: lineForAnalysis,
-      market_basis: marketBasis,
-      matchup,
-      verdict,
-      actual_result: actualResult,
-      distributions: { attempts_threshold: minAttempts, scopes },
-      as_of: new Date().toISOString(),
+    const { response, logPrediction } = await computeQbAnalysis(player, year, {
+      opponentAbbrParam: req.query.opponentAbbr || null,
+      lineOverride: req.query.line != null ? Number(req.query.line) : null,
+      minAttempts: req.query.minAttempts != null ? Number(req.query.minAttempts) : 10,
+      wantsRefresh: String(req.query.refreshOdds).toLowerCase() === "true",
+      espnEventIdParam: req.query.espnEventId || null,
     });
+
+    // Fire-and-forget: logging must never add latency to an interactive page load.
+    logPrediction().catch(err => console.error("[nflLogger] failed:", err?.message || err));
+
+    return res.json(response);
   } catch (err) {
     console.error("qb/analysis error:", err?.response?.data || err.message);
     return res.status(err?.response?.status || 500).json({ error: "Failed to build QB analysis", detail: err?.response?.data || err.message });

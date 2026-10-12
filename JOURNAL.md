@@ -2,6 +2,18 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-10-11
+
+**What changed**
+- `/week/refresh-odds` now also logs a prediction snapshot for every starting QB in every not-yet-started game, via the same verdict computation `/qb/analysis` runs. Extracted that computation out of `/qb/analysis` into a shared `computeQbAnalysis(player, year, opts)` (returns `{ response, logPrediction }`, a thunk the caller fires-and-forgets or awaits) and a shared `resolveStartingQb(side, allQBs)` (the depth-chart lookup `/week` already had). The batch route now runs two loops per scoreboard: the original per-event odds-capture loop (unchanged, still tallied as `captured`/`already_had_market`/`skipped_started`/`no_event`/`failed`), then a per-starter prediction loop (`predictions_logged`/`predictions_already_logged`/`predictions_skipped`/`predictions_failed`).
+
+**Why**
+- **This directly reverses last week's design call, and it was wrong.** The 10-07 entry treated "needs no starter resolution" as the route's selling point. It was actually a correctness gap: the batch button warmed odds for a whole slate and logged nothing, because prediction logging only ever lived inside `/qb/analysis`, which only runs when a matchup is actually opened. Live check after a week of using it: 14 games warmed via the batch button, 1 prediction logged (from manually opening one matchup during testing). Flagged directly: "what the fuck would even be the point otherwise" — the button exists SPECIFICALLY to replace manually opening every matchup; not logging what it warms defeats that.
+- Extracting `computeQbAnalysis` rather than writing a second, parallel verdict computation in the batch route was deliberate — two implementations of the same math drifting apart over time is exactly the kind of bug that's invisible until a backtest number looks wrong for no reason anyone can find. One function, two callers, one with different latency requirements (hence the thunk return rather than a side effect baked into the function).
+- The odds-capture and prediction-logging loops stay separate rather than merged into one per-QB pass, specifically so the odds tally keeps meaning "games," not "QB calls." Calling `computeQbAnalysis` once per starter necessarily touches the same event's odds cache twice (home QB, then away QB) — the second call always sees a cache hit by then, which would make `captured`/`already_had_market` counts measure QB-calls instead of games if the odds tally came from `computeQbAnalysis`'s own result rather than the dedicated per-event step that already existed and was already verified correct.
+- Regression-checked the extraction before testing the new behavior: `GET /qb/analysis` against a live in-progress game still returned the right `odds_locked`/`line`/`verdict` shape post-refactor, confirming `computeQbAnalysis` is a faithful lift of the original route body, not a rewrite.
+- Verified live: the week's one remaining pre-kickoff game logged both starters on the first run (`predictions_logged: 2`), a second run logged zero and correctly reported `predictions_already_logged: 2`, and the odds tally stayed at the game level (`already_had_market: 15`, not 30) across both runs.
+
 ## 2026-10-07
 
 **What changed**
