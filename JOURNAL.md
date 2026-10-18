@@ -2,6 +2,17 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-10-18
+
+**What changed**
+- `computeQbAnalysis`'s `logPrediction` thunk now resolves a status string (`"logged"` / `"already_logged"` / `"no_line"` / `"no_schedule_match"` / `"not_applicable"`) instead of a boolean. `/week/refresh-odds` tallies `no_line` into its own `predictions_no_line` bucket, separate from `predictions_already_logged`.
+
+**Why**
+- Caught live, minutes before today's 1pm slate: asked to confirm the week's lines were cached and ready for later analysis, ran the batch refresh, and it reported `predictions_already_logged: 24` for a week where two QBs (Tanner McKee, Baker Mayfield) had zero books quoting them at all -- confirmed via a direct `/qb/analysis` call (`line: null`, `book_count: 0`). `logPredictionIfNew` correctly declines to write when `line` is null, but it signals that the exact same way (resolves `false`) as "a snapshot already existed," so last week's boolean-returning thunk couldn't tell the two apart -- "nothing to log yet" silently read as "already logged."
+- The thunk now short-circuits on `lineForAnalysis == null` before ever calling `logPredictionIfNew`, so by the time that call actually happens, a `false` unambiguously means "already existed" -- the ambiguity is resolved one layer up, not by touching `nflLogger.js`'s own contract (it has exactly one call site).
+- `/qb/analysis`'s fire-and-forget caller needed no change -- it only ever called `.catch()` on the promise and discarded the resolved value, so changing boolean-to-string is invisible to it.
+- Verified live against the real slate: re-running the batch refresh post-fix correctly reported `predictions_no_line: 3` (Lamar Jackson, McKee, Mayfield -- all three cross-checked against `/week`'s `market_posted: false`) instead of folding them into `already_logged: 21`.
+
 ## 2026-10-11
 
 **What changed**
