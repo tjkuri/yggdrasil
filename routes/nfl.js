@@ -359,23 +359,32 @@ async function computeQbAnalysis(player, year, opts = {}) {
   }
 
   // --- Prediction snapshot thunk (write-once by season+week+player) — caller decides
-  // whether to fire-and-forget or await it. No-ops (resolves false) when there's no
-  // opponent/event, or the game has already started.
-  let logPrediction = async () => false;
+  // whether to fire-and-forget or await it. Resolves a status string rather than a boolean:
+  // "logged" (wrote a new snapshot), "already_logged" (one existed already), "no_line" (no
+  // DK and no consensus line exists yet — nothing to log, NOT the same as already logged),
+  // "no_schedule_match" (couldn't resolve season/week for the matchup — rare, logged via
+  // console.warn below), or "not_applicable" (no opponent/event, or the game already
+  // started). Collapsing "no_line" into the same false/already-logged bucket a boolean
+  // return would imply is exactly the bug this shape exists to prevent — a QB nobody's
+  // posted a market for yet would silently read as "already logged" to a caller tallying
+  // batch results, when nothing was ever written for them at all.
+  let logPrediction = async () => "not_applicable";
   if (opponentAbbr && event && !isPastKickoff) {
     logPrediction = async () => {
+      if (lineForAnalysis == null) return "no_line";
       const homeAbbr = TEAM_NAME_TO_ABBR[event.home_team];
       const awayAbbr = TEAM_NAME_TO_ABBR[event.away_team];
       const result = await nflSchedule.getWeekForMatchup({ homeAbbr, awayAbbr, commenceTime: event.commence_time });
       if (!result) {
         console.warn("[nflLogger] skipped: no schedule match for", { homeAbbr, awayAbbr, commenceTime: event.commence_time });
-        return false;
+        return "no_schedule_match";
       }
-      return nflLogger.logPredictionIfNew({
+      const wasNew = await nflLogger.logPredictionIfNew({
         season: result.season, week: result.week, player, opponentAbbr,
         line: lineForAnalysis, scopeUsed: verdictScopeName, verdict,
         adjustedMean: scopes[verdictScopeName]?.mean ?? null,
       });
+      return wasNew ? "logged" : "already_logged";
     };
   }
 
@@ -526,7 +535,7 @@ router.post("/week/refresh-odds", async (req, res) => {
     const predictionDetails = [];
     const tally = {
       captured: 0, already_had_market: 0, skipped_started: 0, no_event: 0, failed: 0,
-      predictions_logged: 0, predictions_already_logged: 0, predictions_skipped: 0, predictions_failed: 0,
+      predictions_logged: 0, predictions_already_logged: 0, predictions_no_line: 0, predictions_skipped: 0, predictions_failed: 0,
     };
 
     // Sequential on purpose: these are paid upstream calls (and each starter's analysis is a
@@ -593,14 +602,22 @@ router.post("/week/refresh-odds", async (req, res) => {
 
         try {
           const { logPrediction } = await computeQbAnalysis(player, year, { opponentAbbrParam: oppSide.abbr });
-          const logged = await logPrediction();
-          if (logged) {
+          const status = await logPrediction();
+          if (status === "logged") {
             tally.predictions_logged++;
-            predictionDetails.push({ matchup, side: sideKey, player: player.name, status: "logged" });
-          } else {
+          } else if (status === "already_logged") {
             tally.predictions_already_logged++;
-            predictionDetails.push({ matchup, side: sideKey, player: player.name, status: "already_logged" });
+          } else if (status === "no_line") {
+            // Distinct from "already_logged" on purpose — nothing was ever written for this
+            // QB, there's just no DK or consensus line to log yet. Conflating the two would
+            // silently misreport "no market posted" as "already have this one covered."
+            tally.predictions_no_line++;
+          } else {
+            // "no_schedule_match" or "not_applicable" — the latter shouldn't normally reach
+            // here given the g.state === "pre" pre-check above, but handled gracefully.
+            tally.predictions_skipped++;
           }
+          predictionDetails.push({ matchup, side: sideKey, player: player.name, status });
         } catch (err) {
           tally.predictions_failed++;
           predictionDetails.push({ matchup, side: sideKey, player: player.name, status: "failed", detail: err?.message || "analysis failed" });
