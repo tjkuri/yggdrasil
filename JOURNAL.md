@@ -2,6 +2,17 @@
 Need a file to keep track of why I chose to so certain things.
 The front end repo mimir has its own version of this, trying to keep notes in the repo that best makes sense but occasionally some things are relavent to both (e.g., the addition of a new stat to track or a new sport to include, that overarching kind of thing will probably be thrown into Mimir's Journal.md)
 
+## 2026-10-21 — market_basis + book_count added to the prediction log
+
+**What changed**
+- `logPredictionIfNew` (`services/nflLogger.js`) accepts and persists two new optional fields: `market_basis` ("draftkings" | "consensus") and `book_count`, sourced from values `computeQbAnalysis` already computes (`marketBasis.used`, `oddsPayload.book_count`) -- no new network calls, just persisting data already in memory.
+
+**Why**
+- Week 6's backtest (n=17 actionable, 35.3% hit rate, HIGH confidence specifically at 30% vs NO_BET's 60%) raised two hypotheses worth testing: does the HIGH-tier underperformance track raw edge magnitude, or specifically track predictions priced off a thin/consensus fallback rather than DraftKings itself?
+- Checked the edge-magnitude hypothesis first since it needed no new data -- inconclusive. HIGH's edge range (17.1-39.1) and MEDIUM's (20.6-30.8) overlap too much to separate from confidence tier at n=17; confidence is itself derived from a Wilson-interval version of the same underlying quantity, so this isn't really an independent variable yet.
+- The market_basis hypothesis turned out to be unanswerable with existing data -- the snapshot only ever recorded the final `line` number, never which side of the market produced it. That's gone for every week already logged, not just slow to accumulate.
+- Added the two fields so this becomes testable going forward. Deliberately NOT backfilled or inferred for past weeks -- there's no way to reconstruct which basis priced an already-logged `line` after the fact, and guessing would plant fake data in a log whose entire value is being an honest record.
+
 ## 2026-10-18
 
 **What changed**
