@@ -383,6 +383,7 @@ async function computeQbAnalysis(player, year, opts = {}) {
         season: result.season, week: result.week, player, opponentAbbr,
         line: lineForAnalysis, scopeUsed: verdictScopeName, verdict,
         adjustedMean: scopes[verdictScopeName]?.mean ?? null,
+        marketBasis: marketBasis?.used ?? null, bookCount: oddsPayload?.book_count ?? null,
       });
       return wasNew ? "logged" : "already_logged";
     };

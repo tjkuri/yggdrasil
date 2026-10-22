@@ -12,7 +12,10 @@ const CACHE_DIR = path.join(__dirname, "../cache/nfl-predictions");
  * @returns {Promise<boolean>} true if a new snapshot was written, false if one already
  *   existed for this (season, week, player) or required fields were missing.
  */
-async function logPredictionIfNew({ season, week, player, opponentAbbr, line, scopeUsed, verdict, adjustedMean }) {
+async function logPredictionIfNew({
+  season, week, player, opponentAbbr, line, scopeUsed, verdict, adjustedMean,
+  marketBasis = null, bookCount = null,
+}) {
   if (season == null || week == null || !player?.id || line == null) return false;
 
   const safeId = String(player.id).replace(/[^A-Za-z0-9._-]/g, "_");
@@ -28,6 +31,13 @@ async function logPredictionIfNew({ season, week, player, opponentAbbr, line, sc
     scope_used: scopeUsed,
     verdict,
     adjusted_mean: adjustedMean,
+    // Which side of the market actually produced `line` (DraftKings vs. a consensus
+    // fallback) and how many books were quoting at all — not derivable from `line` alone,
+    // and needed to test whether HIGH-confidence misses cluster around thin/fallback
+    // markets rather than DK's own number. Optional: older call sites that don't pass
+    // these just log `null`, same as before this field existed.
+    market_basis: marketBasis,
+    book_count: bookCount,
     logged_at: new Date().toISOString(),
   };
 
